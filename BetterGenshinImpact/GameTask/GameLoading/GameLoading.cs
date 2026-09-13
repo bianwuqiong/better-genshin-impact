@@ -39,7 +39,11 @@ public class GameLoadingTrigger : ITaskTrigger
     private static ILogger<GameLoadingTrigger> _logger = App.GetLogger<GameLoadingTrigger>();
 
 
-    // private int _enterGameClickCount = 0;
+    private const int MaxEnterGameClickAttempts = 5;
+    private static readonly TimeSpan EnterGameClickInterval = TimeSpan.FromSeconds(5);
+    private int _enterGameClickAttempts;
+    private DateTime _lastEnterGameClickTime = DateTime.MinValue;
+    private bool _enterGameClickLimitLogged;
     // private int _welkinMoonClickCount = 0;
     // private int _noneClickCount, _wmNoneClickCount;
 
@@ -312,7 +316,7 @@ public class GameLoadingTrigger : ITaskTrigger
             var extraEnterGameBtn = content.CaptureRectArea.Find(RecognitionAssets.Get("GameLoading", "ChooseEnterGame", content.CaptureRectArea));
             if (!extraEnterGameBtn.IsEmpty())
             {
-                extraEnterGameBtn.Click();
+                TryClickEnterGame(() => extraEnterGameBtn.Click(), "账号选择确认");
                 return;
             }
         }
@@ -322,8 +326,9 @@ public class GameLoadingTrigger : ITaskTrigger
 
         if (!ra.IsEmpty())
         {
-            TaskContext.Instance().PostMessageSimulator.LeftButtonClickBackground();
-            biliLoginClicked = true;
+            // PostMessage 在远程/独立会话中可能不会到达游戏。模板已确认入口存在，
+            // 这里使用 BetterGI 其他前台操作共用的游戏客户区坐标点击路径。
+            TryClickEnterGame(() => GameCaptureRegion.GameRegion1080PPosClick(960, 540), "点击进入");
             return;
         }
 
@@ -381,6 +386,33 @@ public class GameLoadingTrigger : ITaskTrigger
             Debug.WriteLine("[GameLoading] 跳过原石");
             return;
         }
+    }
+
+    private bool TryClickEnterGame(Action click, string buttonName)
+    {
+        if (_enterGameClickAttempts >= MaxEnterGameClickAttempts)
+        {
+            if (!_enterGameClickLimitLogged)
+            {
+                _logger.LogWarning("自动开门：已连续点击 {Count} 次仍未进入，停止继续点击以便诊断", MaxEnterGameClickAttempts);
+                _enterGameClickLimitLogged = true;
+            }
+
+            return false;
+        }
+
+        if (DateTime.Now - _lastEnterGameClickTime < EnterGameClickInterval)
+        {
+            return false;
+        }
+
+        click();
+        _lastEnterGameClickTime = DateTime.Now;
+        _enterGameClickAttempts++;
+        _logger.LogInformation("自动开门：点击{ButtonName}（第 {Attempt}/{MaxAttempts} 次）", buttonName,
+            _enterGameClickAttempts, MaxEnterGameClickAttempts);
+        biliLoginClicked = true;
+        return true;
     }
 
     // B服登录窗口检测
