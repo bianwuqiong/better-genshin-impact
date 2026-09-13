@@ -121,6 +121,10 @@ public partial class OneDragonFlowConfig : ObservableObject
     // 合成浓缩后保留原粹树脂的数量
     [ObservableProperty]
     private int _minResinToKeep = 0;
+
+    // 读取合成前后库存，按保留数量尽可能合成，并只在库存变化吻合时报告成功
+    [ObservableProperty]
+    private bool _autoCraftAllCondensedResin = false;
     
     // 普通周日或限时奖励选项
     [ObservableProperty]

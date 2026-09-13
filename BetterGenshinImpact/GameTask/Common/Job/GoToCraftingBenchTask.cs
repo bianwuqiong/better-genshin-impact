@@ -4,6 +4,7 @@ using BetterGenshinImpact.GameTask.AutoPathing;
 using BetterGenshinImpact.GameTask.AutoPathing.Model;
 using BetterGenshinImpact.GameTask.Common.BgiVision;
 using BetterGenshinImpact.GameTask.Common.Element.Assets;
+using BetterGenshinImpact.GameTask.Model.Area;
 using Microsoft.Extensions.Logging;
 using System;
 using System.Threading;
@@ -19,6 +20,7 @@ using System.Collections.Generic;
 using System.Collections.ObjectModel;
 using System.IO;
 using Newtonsoft.Json;
+using OpenCvSharp;
 
 
 namespace BetterGenshinImpact.GameTask.Common.Job;
@@ -30,6 +32,7 @@ public class GoToCraftingBenchTask
     public string Name => "前往合成台";
 
     private readonly int _retryTimes = 2;
+    private bool _craftActionCommitted;
 
     private readonly ChooseTalkOptionTask _chooseTalkOptionTask = new();
     
@@ -47,6 +50,7 @@ public class GoToCraftingBenchTask
     
     public async Task GoCraftResin(string country, CancellationToken ct)
     {
+        _craftActionCommitted = false;
         Logger.LogInformation("→ {Name} 开始", Name);
         for (int i = 0; i < _retryTimes; i++)
         {
@@ -58,6 +62,10 @@ public class GoToCraftingBenchTask
             catch (Exception e)
             {
                 Logger.LogError("前往合成台领取奖励执行异常：" + e.Message);
+                if (_craftActionCommitted || e is CraftingOutcomeUnknownException)
+                {
+                    throw;
+                }
                 if (i == _retryTimes - 1)
                 {
                     // 通知失败
@@ -87,101 +95,24 @@ public class GoToCraftingBenchTask
         if (resin.IsExist())
         {
             InitConfigList();
-            // 3. 点击合成树脂
-            if (SelectedConfig?.MinResinToKeep > 0){//开关判断，填写的数量大于0时启用 SelectedConfig.MinResinToKeep
-                var fragileResinCount = 0;
-                var condensedResinCount = 0;
-                var fragileResinCountRa = ra.Find(ElementRecognition.Get("fragileResinCount", ra));
-                if (!fragileResinCountRa.IsEmpty())
-                {
-                    // 图像下方就是脆弱树脂数量
-                    var countArea = ra.DeriveCrop(fragileResinCountRa.X, fragileResinCountRa.Y + fragileResinCountRa.Height,
-                        fragileResinCountRa.Width, fragileResinCountRa.Height);
-                    var count = OcrFactory.Paddle.OcrWithoutDetector(countArea.SrcMat);
-                    // Logger.LogInformation("识别原粹树脂数量：{Count}", count);
-                    var match = System.Text.RegularExpressions.Regex.Match(count, @"(\d+)\s*[/17]\s*(6|60)");
-                    if (match.Success)
-                    {
-                        var numericPart = match.Groups[1].Value;
-                        fragileResinCount = StringUtils.TryParseInt(numericPart);
-                        Logger.LogInformation("提取到的原粹树脂数量：{fragileResinCount}", fragileResinCount);
-                    }
-                }
-                
-                //浓缩纠缠重试
-                var condensed =await NewRetry.WaitForAction(() =>
-                {
-                    var condensedResinCountRa = ra.Find(ElementRecognition.Get("CondensedResinCount", ra));
-                    if (!condensedResinCountRa.IsEmpty())
-                    {
-                        // 图像右侧就是浓缩树脂数量
-                        var countArea = ra.DeriveCrop(condensedResinCountRa.X + condensedResinCountRa.Width,
-                            condensedResinCountRa.Y, condensedResinCountRa.Width*5/3, condensedResinCountRa.Height);
-                        var count = OcrFactory.Paddle.OcrWithoutDetector(countArea.CacheGreyMat);
-                        condensedResinCount = StringUtils.TryParseInt(count);
-                    }
-                    return condensedResinCount >= 0 && condensedResinCount <=5;
-                },ct,3,200); 
-                if (!condensed)
-                {
-                    Simulation.SendInput.Keyboard.KeyPress(User32.VK.VK_ESCAPE);
-                    await new ReturnMainUiTask().Start(ct);
-                    throw new Exception($"识别浓缩树脂数量失败: {condensedResinCount}");
-                }
-                
-                // 每次合成消耗的数量
-                const int resinConsumedPerCraft = 60;
-                // 需要保留的最小数量
-                 int minResinToKeep = SelectedConfig.MinResinToKeep;
-                // 可以用来合成的树脂数量
-                int resinAvailableForCrafting = fragileResinCount - minResinToKeep;
-                // 最大可合成次数
-                int maxCraftsPossible = 5 - condensedResinCount;
-                // 计算需要合成的次数
-                int craftsNeeded = resinAvailableForCrafting / resinConsumedPerCraft;
-                if (craftsNeeded < 0)
-                {
-                    craftsNeeded = 0;
-                }
-                // 计算最大合成次数
-                craftsNeeded = Math.Min(maxCraftsPossible, craftsNeeded);
-                Logger.LogInformation("原粹树脂: {FragileResinCount}，浓缩树脂: {CondensedResinCount}，最大可合成次数为: {maxCraftsPossible}", fragileResinCount,
-                    condensedResinCount, maxCraftsPossible);
-                Logger.LogInformation("保留 {MinResinToKeep} 原粹树脂需要合成次数： {craftsNeeded}",minResinToKeep,craftsNeeded);
-                if (craftsNeeded > 0)
-                {
-                    for (int i = 0; i < 5; i++)
-                    {
-                        Bv.ClickReduceButton(ra);
-                        await Delay(150, ct);
-                    }
-                    await Delay(300, ct);
-                    for (int i = 0; i < craftsNeeded-1; i++)
-                    {
-                        Bv.ClickAddButton(ra);
-                        await Delay(150, ct);
-                    }
-                    await Delay(200, ct);
-                    //await Delay(100000, ct);//调试延时=========
-                    Bv.ClickWhiteConfirmButton(ra);
-                    Logger.LogInformation("合成{Text}", "浓缩树脂");
-                    await Delay(300, ct);
-                    using var confirmCapture = CaptureToRectArea();
-                    Bv.ClickBlackConfirmButton(confirmCapture);
-                }
-                else
-                {
-                    Logger.LogInformation("无需合成浓缩树脂");
-                }
+            if (SelectedConfig?.AutoCraftAllCondensedResin == true || SelectedConfig?.MinResinToKeep > 0)
+            {
+                await CraftCondensedResinWithVerification(ct);
             }
             else
             {
-                //await Delay(100000, ct);//调试延时=========
-                Bv.ClickWhiteConfirmButton(ra);
-                Logger.LogInformation("合成{Text}", "浓缩树脂");
+                if (!Bv.ClickWhiteConfirmButton(ra))
+                {
+                    throw new Exception("未找到合成确认按钮");
+                }
+                _craftActionCommitted = true;
                 await Delay(300, ct);
                 using var confirmCapture = CaptureToRectArea();
-                Bv.ClickBlackConfirmButton(confirmCapture);
+                if (!Bv.ClickBlackConfirmButton(confirmCapture))
+                {
+                    throw new Exception("未找到合成结果确认按钮");
+                }
+                Logger.LogInformation("已点击合成{Text}，但未启用库存验证", "浓缩树脂");
             }
             await Delay(1300, ct);
             // 直接ESC退出即可
@@ -193,6 +124,237 @@ public class GoToCraftingBenchTask
         }
 
         await new ReturnMainUiTask().Start(ct);
+    }
+
+    private async Task CraftCondensedResinWithVerification(CancellationToken ct)
+    {
+        const int resinConsumedPerCraft = 60;
+        const int maxCondensedResin = 5;
+        var initial = await ReadCraftingResinCounts(ct);
+        var current = initial;
+        int minResinToKeep = Math.Max(0, SelectedConfig?.MinResinToKeep ?? 0);
+        int totalCrafted = 0;
+        Logger.LogInformation(
+            "浓缩树脂合成前核验：原粹树脂={OriginalResin}，浓缩树脂={CondensedResin}，保留={MinResinToKeep}",
+            initial.OriginalResin, initial.CondensedResin, minResinToKeep);
+
+        // 每次只合成一个并核验库存，再决定是否继续。任何一次动作后结果未知都终止，禁止重放。
+        for (int craftIndex = 0; craftIndex < maxCondensedResin; craftIndex++)
+        {
+            if (current.CondensedResin >= maxCondensedResin
+                || current.OriginalResin - minResinToKeep < resinConsumedPerCraft)
+            {
+                break;
+            }
+
+            Logger.LogInformation(
+                "准备单个合成：第 {CraftNumber} 个，核验库存原粹/浓缩={OriginalResin}/{CondensedResin}",
+                totalCrafted + 1, current.OriginalResin, current.CondensedResin);
+            using var actionCapture = CaptureToRectArea();
+            // 把数量降到 1；到达下限后减少按钮不可点击是正常状态。
+            for (int i = 0; i < maxCondensedResin; i++)
+            {
+                Bv.ClickReduceButton(actionCapture);
+                await Delay(150, ct);
+            }
+            await Delay(300, ct);
+            await VerifySingleCraftQuantity(ct);
+            using var submitCapture = CaptureToRectArea();
+            if (!Bv.ClickWhiteConfirmButton(submitCapture))
+            {
+                throw new Exception("未找到合成确认按钮");
+            }
+            _craftActionCommitted = true;
+
+            CraftingResinCounts after;
+            try
+            {
+                bool resultDismissed = await NewRetry.WaitForAction(() =>
+                {
+                    using var confirmCapture = CaptureToRectArea();
+                    return Bv.ClickBlackConfirmButton(confirmCapture);
+                }, ct, 8, 300);
+                if (!resultDismissed)
+                {
+                    throw new Exception("未找到合成结果确认按钮");
+                }
+
+                await Delay(1000, ct);
+                after = await ReadCraftingResinCounts(ct);
+            }
+            catch (Exception e)
+            {
+                throw new CraftingOutcomeUnknownException("已点击合成确认，但结果或后库存无法确认；禁止自动重试", e);
+            }
+
+            int expectedOriginal = current.OriginalResin - resinConsumedPerCraft;
+            int expectedCondensed = current.CondensedResin + 1;
+            if (after.OriginalResin != expectedOriginal || after.CondensedResin != expectedCondensed)
+            {
+                throw new CraftingOutcomeUnknownException(
+                    $"单个合成后库存与计划不符：期望原粹/浓缩={expectedOriginal}/{expectedCondensed}，实际={after.OriginalResin}/{after.CondensedResin}；禁止自动重试");
+            }
+
+            totalCrafted++;
+            current = after;
+            Logger.LogInformation("单个浓缩树脂库存核验通过：累计合成 {Crafted} 个", totalCrafted);
+        }
+
+        string status = totalCrafted > 0 ? "success" : "skipped";
+        EmitCraftingEvent(status, initial, current, totalCrafted, minResinToKeep);
+        if (totalCrafted == 0)
+        {
+            Logger.LogInformation("无需合成浓缩树脂，库存已核验");
+        }
+        else
+        {
+            Logger.LogInformation("浓缩树脂批次核验完成：共合成 {Crafted} 个", totalCrafted);
+        }
+    }
+
+    private async Task VerifySingleCraftQuantity(CancellationToken ct)
+    {
+        string raw = string.Empty;
+        int recognizedQuantity = -1;
+        int consecutiveMatches = 0;
+        bool verified = await NewRetry.WaitForAction(() =>
+        {
+            using var capture = CaptureToRectArea();
+            double scale = TaskContext.Instance().SystemInfo.AssetScale;
+            using var quantityArea = capture.DeriveCrop(new Rect(
+                (int)Math.Round(1248 * scale),
+                (int)Math.Round(615 * scale),
+                (int)Math.Round(221 * scale),
+                (int)Math.Round(34 * scale)));
+            raw = StringUtils.ConvertFullWidthNumToHalfWidth(OcrFactory.Paddle.Ocr(quantityArea.SrcMat)).Trim();
+            var match = System.Text.RegularExpressions.Regex.Match(raw, @"\d+");
+            recognizedQuantity = match.Success ? StringUtils.TryParseInt(match.Value, -1) : -1;
+            consecutiveMatches = recognizedQuantity == 1 ? consecutiveMatches + 1 : 0;
+            return consecutiveMatches >= 3;
+        }, ct, 15, 200);
+        if (!verified)
+        {
+            throw new Exception($"合成数量未能在确认前稳定核验为 1：OCR='{raw}'，数量={recognizedQuantity}");
+        }
+
+        Logger.LogInformation("合成数量已连续三帧核验为 1");
+    }
+
+    private async Task<CraftingResinCounts> ReadCraftingResinCounts(CancellationToken ct)
+    {
+        int originalResin = -1;
+        int condensedResin = -1;
+        string originalRaw = string.Empty;
+        string condensedRaw = string.Empty;
+        CraftingResinCounts? previous = null;
+        CraftingResinCounts? stable = null;
+        int consecutiveMatches = 0;
+        bool recognized = await NewRetry.WaitForAction(() =>
+        {
+            using var capture = CaptureToRectArea();
+            bool originalOk = TryReadOriginalResinCount(capture, out originalResin, out originalRaw);
+            bool condensedOk = TryReadCondensedResinCount(capture, out condensedResin, out condensedRaw);
+            if (!originalOk || !condensedOk)
+            {
+                previous = null;
+                consecutiveMatches = 0;
+                return false;
+            }
+
+            var current = new CraftingResinCounts(originalResin, condensedResin);
+            consecutiveMatches = current == previous ? consecutiveMatches + 1 : 1;
+            previous = current;
+            if (consecutiveMatches < 3)
+            {
+                return false;
+            }
+
+            stable = current;
+            return true;
+        }, ct, 15, 250);
+        if (!recognized || stable == null)
+        {
+            throw new Exception(
+                $"识别合成库存失败：原粹='{originalRaw}' ({originalResin})，浓缩='{condensedRaw}' ({condensedResin})");
+        }
+
+        return stable;
+    }
+
+    private static bool TryReadOriginalResinCount(ImageRegion region, out int count, out string raw)
+    {
+        count = -1;
+        raw = string.Empty;
+        var icon = region.Find(ElementRecognition.Get("fragileResinCount", region));
+        if (icon.IsEmpty())
+        {
+            return false;
+        }
+
+        using var countArea = region.DeriveCrop(icon.X, icon.Y + icon.Height, icon.Width, icon.Height);
+        raw = OcrFactory.Paddle.OcrWithoutDetector(countArea.SrcMat).Trim();
+        var match = System.Text.RegularExpressions.Regex.Match(raw, @"^\s*(?<current>\d{1,3})\s*/\s*(?:160|200)\s*$");
+        if (!match.Success)
+        {
+            return false;
+        }
+
+        count = StringUtils.TryParseInt(match.Groups["current"].Value, -1);
+        return count is >= 0 and <= 200;
+    }
+
+    private static bool TryReadCondensedResinCount(ImageRegion region, out int count, out string raw)
+    {
+        count = -1;
+        raw = string.Empty;
+        var icon = region.Find(ElementRecognition.Get("CondensedResinCount", region));
+        if (icon.IsEmpty())
+        {
+            return false;
+        }
+
+        using var countArea = region.DeriveCrop(icon.X + icon.Width, icon.Y, icon.Width * 5 / 3, icon.Height);
+        raw = OcrFactory.Paddle.OcrWithoutDetector(countArea.CacheGreyMat).Trim();
+        var match = System.Text.RegularExpressions.Regex.Match(raw, @"^\s*(?<count>[0-5])\s*$");
+        if (!match.Success)
+        {
+            return false;
+        }
+
+        count = StringUtils.TryParseInt(match.Groups["count"].Value, -1);
+        return count is >= 0 and <= 5;
+    }
+
+    private static void EmitCraftingEvent(string status, CraftingResinCounts before, CraftingResinCounts after,
+        int crafts, int minResinToKeep)
+    {
+        string payload = JsonConvert.SerializeObject(new
+        {
+            task = "合成树脂",
+            status,
+            evidenceVerified = true,
+            originalResinBefore = before.OriginalResin,
+            originalResinAfter = after.OriginalResin,
+            condensedResinBefore = before.CondensedResin,
+            condensedResinAfter = after.CondensedResin,
+            condensedResinCreated = crafts,
+            originalResinSpent = crafts * 60,
+            minResinToKeep
+        });
+        Logger.LogInformation("[AUTO_GAME_EVENT] " + payload);
+    }
+
+    private sealed record CraftingResinCounts(int OriginalResin, int CondensedResin);
+
+    private sealed class CraftingOutcomeUnknownException : Exception
+    {
+        public CraftingOutcomeUnknownException(string message) : base(message)
+        {
+        }
+
+        public CraftingOutcomeUnknownException(string message, Exception innerException) : base(message, innerException)
+        {
+        }
     }
 
     /// <summary>
@@ -322,18 +484,8 @@ public class GoToCraftingBenchTask
 
         if (selected == null)
         {
-            if (configs.Count > 0)
-            {
-                selected = configs[0];
-            }
-            else
-            {
-                selected = new OneDragonFlowConfig
-                {
-                    Name = "默认配置"
-                };
-                configs.Add(selected);
-            }
+            throw new Exception(
+                $"未找到当前一条龙配置：{TaskContext.Instance().Config.SelectedOneDragonFlowConfigName}，禁止使用其他配置执行合成");
         }
 
         ConfigList.Clear();
