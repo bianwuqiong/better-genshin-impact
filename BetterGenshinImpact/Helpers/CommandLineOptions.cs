@@ -55,7 +55,8 @@ public class CommandLineOptions
     /// </summary>
     public bool ShouldDeferGameStart => Action is CommandLineAction.StartOneDragon
         or CommandLineAction.StartGroups
-        or CommandLineAction.TaskProgress;
+        or CommandLineAction.TaskProgress
+        or CommandLineAction.StartChildSessionOneDragon;
 
     private CommandLineOptions(
         CommandLineAction action,
@@ -125,6 +126,13 @@ public class CommandLineOptions
         var arg1 = commandArgs[0];
         var extra = commandArgs.Skip(1).ToArray();
 
+        if (arg1.Equals("--child-session-one-dragon", StringComparison.OrdinalIgnoreCase))
+        {
+            return Create(
+                CommandLineAction.StartChildSessionOneDragon,
+                oneDragonConfigName: extra.Length > 0 ? extra[0] : null);
+        }
+
         if (arg1.Contains("startOneDragon", StringComparison.OrdinalIgnoreCase))
         {
             return Create(
@@ -191,6 +199,9 @@ public enum CommandLineAction
 
     /// <summary>startOneDragon — 启动一条龙</summary>
     StartOneDragon,
+
+    /// <summary>由根实例在桌面分身中启动一条龙</summary>
+    StartChildSessionOneDragon,
 
     /// <summary>--startGroups — 启动调度组</summary>
     StartGroups,

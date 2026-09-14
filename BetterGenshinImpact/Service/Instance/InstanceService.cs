@@ -562,15 +562,18 @@ public sealed class InstanceService : IHostedService, IAsyncDisposable
     {
         Application.Current?.Dispatcher.BeginInvoke(new Action(() =>
         {
+            var commandLineOptions = CommandLineOptions.Parse(args);
             var mainWindow = Application.Current.MainWindow;
-            mainWindow?.Show();
-            mainWindow?.Activate();
-            if (mainWindow is not null)
+            if (commandLineOptions.Action != CommandLineAction.StartChildSessionOneDragon)
             {
-                SystemControl.RestoreWindow(new WindowInteropHelper(mainWindow).Handle);
+                mainWindow?.Show();
+                mainWindow?.Activate();
+                if (mainWindow is not null)
+                {
+                    SystemControl.RestoreWindow(new WindowInteropHelper(mainWindow).Handle);
+                }
             }
 
-            var commandLineOptions = CommandLineOptions.Parse(args);
             App.GetService<HomePageViewModel>()?.HandleActivation(commandLineOptions);
         }));
     }

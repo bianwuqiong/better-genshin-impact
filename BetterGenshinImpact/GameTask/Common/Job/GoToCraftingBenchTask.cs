@@ -28,6 +28,7 @@ namespace BetterGenshinImpact.GameTask.Common.Job;
 public class GoToCraftingBenchTask
 {
     private static readonly string OneDragonFlowConfigFolder = Global.Absolute(@"User\OneDragon");
+    private const int ResinConsumedPerCraft = 60;
     
     public string Name => "前往合成台";
 
@@ -128,7 +129,6 @@ public class GoToCraftingBenchTask
 
     private async Task CraftCondensedResinWithVerification(CancellationToken ct)
     {
-        const int resinConsumedPerCraft = 60;
         const int maxCondensedResin = 5;
         var initial = await ReadCraftingResinCounts(ct);
         var current = initial;
@@ -142,7 +142,7 @@ public class GoToCraftingBenchTask
         for (int craftIndex = 0; craftIndex < maxCondensedResin; craftIndex++)
         {
             if (current.CondensedResin >= maxCondensedResin
-                || current.OriginalResin - minResinToKeep < resinConsumedPerCraft)
+                || current.OriginalResin - minResinToKeep < ResinConsumedPerCraft)
             {
                 break;
             }
@@ -173,21 +173,21 @@ public class GoToCraftingBenchTask
                 {
                     using var confirmCapture = CaptureToRectArea();
                     return Bv.ClickBlackConfirmButton(confirmCapture);
-                }, ct, 8, 300);
+                }, ct, 15, 400);
                 if (!resultDismissed)
                 {
-                    throw new Exception("未找到合成结果确认按钮");
+                    Logger.LogWarning("未识别到合成结果确认按钮，继续通过只读库存变化核验结果");
                 }
 
                 await Delay(1000, ct);
-                after = await ReadCraftingResinCounts(ct);
+                after = await ReadCraftingResinCountsAfterCommittedAction(ct);
             }
             catch (Exception e)
             {
                 throw new CraftingOutcomeUnknownException("已点击合成确认，但结果或后库存无法确认；禁止自动重试", e);
             }
 
-            int expectedOriginal = current.OriginalResin - resinConsumedPerCraft;
+            int expectedOriginal = current.OriginalResin - ResinConsumedPerCraft;
             int expectedCondensed = current.CondensedResin + 1;
             if (after.OriginalResin != expectedOriginal || after.CondensedResin != expectedCondensed)
             {
@@ -281,6 +281,43 @@ public class GoToCraftingBenchTask
         return stable;
     }
 
+    private async Task<CraftingResinCounts> ReadCraftingResinCountsAfterCommittedAction(CancellationToken ct)
+    {
+        try
+        {
+            return await ReadCraftingResinCounts(ct);
+        }
+        catch (Exception firstReadException)
+        {
+            Logger.LogWarning(firstReadException,
+                "合成后无法在当前界面读取库存，返回主界面并重新进入合成台进行只读核验");
+        }
+
+        // 合成动作已经提交，此处只允许恢复界面并读取库存，绝不再次点击合成按钮。
+        await new ReturnMainUiTask().Start(ct);
+        await ReenterCraftingUiForInventoryVerification(ct);
+        return await ReadCraftingResinCounts(ct);
+    }
+
+    private async Task ReenterCraftingUiForInventoryVerification(CancellationToken ct)
+    {
+        bool enteredCraftingTalk = await WaitForCraftingTalkUi(ct);
+        if (!enteredCraftingTalk)
+        {
+            await TryPressCrafting(ct);
+            enteredCraftingTalk = await WaitForCraftingTalkUi(ct);
+        }
+
+        if (!enteredCraftingTalk)
+        {
+            throw new Exception("合成后库存核验时无法重新进入合成台对话");
+        }
+
+        await _chooseTalkOptionTask.SelectLastOptionUntilEnd(ct,
+            region => region.Find(ElementRecognition.Get("BtnWhiteConfirm", region)).IsExist());
+        await Delay(800, ct);
+    }
+
     private static bool TryReadOriginalResinCount(ImageRegion region, out int count, out string raw)
     {
         count = -1;
@@ -293,14 +330,32 @@ public class GoToCraftingBenchTask
 
         using var countArea = region.DeriveCrop(icon.X, icon.Y + icon.Height, icon.Width, icon.Height);
         raw = OcrFactory.Paddle.OcrWithoutDetector(countArea.SrcMat).Trim();
-        var match = System.Text.RegularExpressions.Regex.Match(raw, @"^\s*(?<current>\d{1,3})\s*/\s*(?:160|200)\s*$");
+        return TryParseCraftingOriginalResin(raw, out count);
+    }
+
+    internal static bool TryParseCraftingOriginalResin(string raw, out int count)
+    {
+        count = -1;
+        var normalized = StringUtils.ConvertFullWidthNumToHalfWidth(raw)
+            .Replace('／', '/');
+        // 合成界面显示“当前库存 / 单次所需”，当前版本单次消耗 60。
+        // 兼容旧截图路径中出现的库存上限 160/200，以及斜杠被 OCR 成 1/7 的情况。
+        var match = System.Text.RegularExpressions.Regex.Match(
+            normalized,
+            @"^\s*(?<current>\d{1,3})\s*[/17]\s*(?:60|160|200)\s*$");
         if (!match.Success)
         {
             return false;
         }
 
         count = StringUtils.TryParseInt(match.Groups["current"].Value, -1);
-        return count is >= 0 and <= 200;
+        if (count is < 0 or > 200)
+        {
+            count = -1;
+            return false;
+        }
+
+        return true;
     }
 
     private static bool TryReadCondensedResinCount(ImageRegion region, out int count, out string raw)
@@ -403,7 +458,8 @@ public class GoToCraftingBenchTask
             {
                 Enabled = true,
                 AutoSkipEnabled = true,
-                AutoRunEnabled = country != "枫丹",
+                // 合成台路线都很短；自动奔跑容易越过最后的交互范围，重试成本反而更高。
+                AutoRunEnabled = false,
             },
             EndAction = region => Bv.FindFAndPress(region, text: this.craftLocalizedString)
         };
@@ -411,28 +467,37 @@ public class GoToCraftingBenchTask
 
         await Delay(700, ct);
         
-        // 多种尝试 责任链
-        if (!IsInCraftingTalkUi())
+        // EndAction 可能已经按下“合成”，低帧率时对话界面出现会明显晚于固定 700ms。
+        bool enteredCraftingTalk = await WaitForCraftingTalkUi(ct);
+        if (!enteredCraftingTalk)
         {
-            // 直接重试
             await TryPressCrafting(ct);
-            
-            if (!IsInCraftingTalkUi())
-            {
-                // 往回走一步重试
-                Simulation.SendInput.SimulateAction(GIActions.MoveBackward, KeyType.KeyDown);
-                await Delay(200, ct);
-                Simulation.SendInput.SimulateAction(GIActions.MoveBackward, KeyType.KeyUp);
-                
-                await TryPressCrafting(ct);
-            
-                // 最后 check
-                if (!IsInCraftingTalkUi())
-                {
-                    throw new Exception("未进入和合成台交互对话界面");
-                }
-            
-            }
+            enteredCraftingTalk = await WaitForCraftingTalkUi(ct);
+        }
+
+        if (!enteredCraftingTalk)
+        {
+            // 往回走一小步重新搜索“合成”提示。
+            Simulation.SendInput.SimulateAction(GIActions.MoveBackward, KeyType.KeyDown);
+            await Delay(250, ct);
+            Simulation.SendInput.SimulateAction(GIActions.MoveBackward, KeyType.KeyUp);
+            await TryPressCrafting(ct);
+            enteredCraftingTalk = await WaitForCraftingTalkUi(ct);
+        }
+
+        if (!enteredCraftingTalk)
+        {
+            // 从后退位置向前越过原位置一小步，再做最后一次带文本约束的交互。
+            Simulation.SendInput.SimulateAction(GIActions.MoveForward, KeyType.KeyDown);
+            await Delay(500, ct);
+            Simulation.SendInput.SimulateAction(GIActions.MoveForward, KeyType.KeyUp);
+            await TryPressCrafting(ct);
+            enteredCraftingTalk = await WaitForCraftingTalkUi(ct);
+        }
+
+        if (!enteredCraftingTalk)
+        {
+            throw new Exception("未进入和合成台交互对话界面");
         }
 
         // 等待进入合成界面
@@ -447,6 +512,11 @@ public class GoToCraftingBenchTask
     {
         using var ra = CaptureToRectArea();
         return Bv.IsInTalkUi(ra);
+    }
+
+    private Task<bool> WaitForCraftingTalkUi(CancellationToken ct)
+    {
+        return NewRetry.WaitForAction(IsInCraftingTalkUi, ct, 12, 250);
     }
     
     private async Task<bool> TryPressCrafting( CancellationToken ct)

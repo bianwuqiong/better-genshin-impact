@@ -512,32 +512,48 @@ public partial class OneDragonFlowViewModel : ViewModel
         }
         _autoRun = false;
         //
-        var cmdOptions = CommandLineOptions.Instance;
-        if (cmdOptions.Action == CommandLineAction.StartOneDragon)
+        HandleActivation(CommandLineOptions.Instance);
+    }
+
+    public void HandleActivation(CommandLineOptions cmdOptions)
+    {
+        if (cmdOptions.Action != CommandLineAction.StartOneDragon)
         {
-            // 通过命令行参数启动一条龙。
-            if (cmdOptions.OneDragonConfigName != null)
-            {
-                // 从命令行参数中提取一条龙配置名称。
-                _logger.LogInformation($"参数指定的一条龙配置：{cmdOptions.OneDragonConfigName}");
-                var argsOneDragonConfig = ConfigList.FirstOrDefault(x =>
-                    string.Equals(x.Name, cmdOptions.OneDragonConfigName, StringComparison.Ordinal));
-                if (argsOneDragonConfig != null)
-                {
-                    // 设定配置，配置下拉框会选定。
-                    SelectedConfig = argsOneDragonConfig;
-                    // 调用选定更新函数。
-                    OnConfigDropDownChanged();
-                }
-                else
-                {
-                    _logger.LogWarning("未找到，请检查。");
-                }
-            }
-            // 异步执行一条龙
-            Toast.Information($"命令行一条龙「{SelectedConfig.Name}」。");
-            OnOneKeyExecute();
+            return;
         }
+
+        // 运行器会在进程已启动后写入本次专属配置，命令激活时必须重新扫描。
+        InitConfigList();
+
+        // 通过命令行参数启动一条龙。
+        if (cmdOptions.OneDragonConfigName != null)
+        {
+            // 从命令行参数中提取一条龙配置名称。
+            _logger.LogInformation($"参数指定的一条龙配置：{cmdOptions.OneDragonConfigName}");
+            var argsOneDragonConfig = ConfigList.FirstOrDefault(x =>
+                string.Equals(x.Name, cmdOptions.OneDragonConfigName, StringComparison.Ordinal));
+            if (argsOneDragonConfig != null)
+            {
+                // 设定配置，配置下拉框会选定。
+                SelectedConfig = argsOneDragonConfig;
+                // 调用选定更新函数。
+                OnConfigDropDownChanged();
+            }
+            else
+            {
+                _logger.LogError("未找到参数指定的一条龙配置，已停止命令行任务。");
+                Toast.Error("未找到参数指定的一条龙配置，任务未启动。");
+                return;
+            }
+        }
+        if (SelectedConfig is null)
+        {
+            _logger.LogError("没有可用的一条龙配置，已停止命令行任务。");
+            return;
+        }
+        // 异步执行一条龙
+        Toast.Information($"命令行一条龙「{SelectedConfig.Name}」。");
+        _ = OnOneKeyExecute();
     }
 
     [RelayCommand]

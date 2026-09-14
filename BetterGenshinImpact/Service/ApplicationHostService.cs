@@ -63,7 +63,8 @@ public class ApplicationHostService(
                 // 命令行启动时，并行更新订阅脚本（不阻塞游戏启动和导航）
                 // StartGameTask 会在游戏进入主界面后等待此 Task 完成，再开始执行任务
                 var scriptConfig = TaskContext.Instance().Config.ScriptConfig;
-                if (scriptConfig.AutoUpdateBeforeCommandLineRun)
+                if (scriptConfig.AutoUpdateBeforeCommandLineRun
+                    && cmdOptions.Action != CommandLineAction.StartChildSessionOneDragon)
                 {
                     ScriptRepoUpdater.Instance.CommandLineAutoUpdateTask =
                         Task.Run(() => ScriptRepoUpdater.Instance.AutoUpdateSubscribedScripts());
@@ -75,6 +76,11 @@ public class ApplicationHostService(
                         // 通过命令行参数启动「一条龙」 => 跳转到一条龙配置页。
                         _ = _navigationWindow.Navigate(typeof(OneDragonFlowPage));
                         // 后续代码在 OneDragonFlowViewModel / OnLoaded 中。
+                        break;
+
+                    case CommandLineAction.StartChildSessionOneDragon:
+                        // 根实例只负责建立桌面分身；主页加载后把配置转交给子会话。
+                        _ = _navigationWindow.Navigate(typeof(HomePage));
                         break;
 
                     case CommandLineAction.StartGroups:

@@ -1,3 +1,16 @@
+> [!IMPORTANT]
+> **非官方自动化工作流修改分支 / Unofficial automation-workflow fork**
+>
+> 此分支由 `bianwuqiong` 基于 [BetterGI](https://github.com/babalae/better-genshin-impact) 修改，用于配合
+> [BetterGI Automation Workflow](https://github.com/bianwuqiong/BetterGI-Automation-Workflow)。它不是 BetterGI 官方版本，
+> 未获得 BetterGI、米哈游或 HoYoverse 的隶属、赞助或认可。修改版问题请先提交到修改者的仓库，不要归因于上游维护者。
+> 变更范围、基线和日期见 [MODIFICATIONS.md](./MODIFICATIONS.md)。本分支继续遵循 GNU GPL v3。
+>
+> This branch is an unofficial derivative of [BetterGI](https://github.com/babalae/better-genshin-impact), maintained by
+> `bianwuqiong` for [BetterGI Automation Workflow](https://github.com/bianwuqiong/BetterGI-Automation-Workflow).
+> It is not affiliated with, sponsored by, or endorsed by the BetterGI project, miHoYo, or HoYoverse. Report issues caused
+> by this branch to the fork maintainer first. See [MODIFICATIONS.md](./MODIFICATIONS.md). This branch remains under GNU GPL v3.
+
 <div align="center">
   <h1 align="center">
     <a href="https://www.bettergi.com/"><img src="https://img.alicdn.com/imgextra/i4/2042484851/O1CN016PuRSW1lhoOl4tcHS_!!2042484851.png" width="190"></a>

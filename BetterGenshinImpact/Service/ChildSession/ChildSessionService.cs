@@ -36,6 +36,8 @@ public sealed class ChildSessionService : IDisposable
 
     private ChildSessionWindow? _desktopWindow;
     private bool _autoLaunchBetterGiPending;
+    private string? _pendingOneDragonConfigName;
+    private TaskCompletionSource<bool>? _pendingLaunchCompletionSource;
     private TaskCompletionSource<bool>? _connectionAttemptCompletionSource;
     private ChildSessionConnectionFailedEventArgs? _lastConnectionFailure;
     private int _initialConnectionRetriesRemaining;
@@ -287,6 +289,64 @@ public sealed class ChildSessionService : IDisposable
         return LaunchBetterGiCoreAsync(isAutomatic: false);
     }
 
+    public async Task StartAndLaunchOneDragonAsync(string oneDragonConfigName)
+    {
+        ThrowIfDisposed();
+        if (!_instanceService.Context.IsRoot)
+        {
+            throw new InvalidOperationException("只有 BetterGI 根实例可以启动桌面分身任务。");
+        }
+        if (string.IsNullOrWhiteSpace(oneDragonConfigName))
+        {
+            throw new ArgumentException("必须指定一条龙配置名称。", nameof(oneDragonConfigName));
+        }
+        if (IsRdpWrapperEnabled())
+        {
+            throw new InvalidOperationException(
+                "检测到已启用 RDP Wrapper；它与 BetterGI 桌面分身不兼容，已停止启动。");
+        }
+
+        RefreshState();
+        if (ConnectedState == 1 && ChildSessionId is not null)
+        {
+            await LaunchBetterGiCoreAsync(
+                isAutomatic: false,
+                oneDragonConfigName: oneDragonConfigName);
+            HideForBackgroundTask();
+            return;
+        }
+
+        if (_pendingLaunchCompletionSource is { Task.IsCompleted: false })
+        {
+            throw new InvalidOperationException("已有桌面分身任务正在等待连接或启动。");
+        }
+
+        var completionSource = new TaskCompletionSource<bool>(
+            TaskCreationOptions.RunContinuationsAsynchronously);
+        _pendingOneDragonConfigName = oneDragonConfigName;
+        _pendingLaunchCompletionSource = completionSource;
+        try
+        {
+            await StartAsync();
+            await completionSource.Task.WaitAsync(
+                ConnectionTimeout,
+                _disposeCancellationTokenSource.Token);
+        }
+        catch (Exception exception)
+        {
+            completionSource.TrySetException(exception);
+            throw;
+        }
+        finally
+        {
+            if (ReferenceEquals(_pendingLaunchCompletionSource, completionSource))
+            {
+                _pendingLaunchCompletionSource = null;
+                _pendingOneDragonConfigName = null;
+            }
+        }
+    }
+
     public bool IsRelativeMouseForwardingAvailable()
     {
         return _desktopWindow?.IsVisible == true
@@ -329,6 +389,9 @@ public sealed class ChildSessionService : IDisposable
     {
         ThrowIfDisposed();
         _autoLaunchBetterGiPending = false;
+        _pendingLaunchCompletionSource?.TrySetCanceled();
+        _pendingLaunchCompletionSource = null;
+        _pendingOneDragonConfigName = null;
         _initialConnectionRetriesRemaining = 0;
         _pendingRdpSettingChanges = RdpSettingChange.None;
         _rdpSettingsReconnectRetriesRemaining = 0;
@@ -403,6 +466,9 @@ public sealed class ChildSessionService : IDisposable
         _statusTimer.Tick -= OnStatusTimerTick;
         _disposeCancellationTokenSource.Cancel();
         _autoLaunchBetterGiPending = false;
+        _pendingLaunchCompletionSource?.TrySetCanceled();
+        _pendingLaunchCompletionSource = null;
+        _pendingOneDragonConfigName = null;
         _connectionAttemptCompletionSource?.TrySetCanceled();
         _connectionAttemptCompletionSource = null;
         _initialConnectionRetriesRemaining = 0;
@@ -512,7 +578,9 @@ public sealed class ChildSessionService : IDisposable
         }
     }
 
-    private async Task LaunchBetterGiCoreAsync(bool isAutomatic)
+    private async Task LaunchBetterGiCoreAsync(
+        bool isAutomatic,
+        string? oneDragonConfigName = null)
     {
         await _launchSemaphore.WaitAsync();
         try
@@ -521,7 +589,9 @@ public sealed class ChildSessionService : IDisposable
             RefreshState(isAutomatic
                 ? "桌面分身已加载，正在自动以管理员权限启动 BetterGI"
                 : "正在以管理员权限启动 BetterGI");
-            await ChildSessionProcessLauncher.LaunchBetterGiAsync(childSessionId);
+            await ChildSessionProcessLauncher.LaunchBetterGiAsync(
+                childSessionId,
+                oneDragonConfigName);
             RefreshState(
                 $"已在桌面分身（会话 {childSessionId}）中以管理员权限启动 BetterGI");
         }
@@ -620,12 +690,15 @@ public sealed class ChildSessionService : IDisposable
             RefreshState("桌面分身登录初始化完成");
         }
 
-        if (!_autoLaunchBetterGiPending)
+        var oneDragonConfigName = _pendingOneDragonConfigName;
+        var launchCompletionSource = _pendingLaunchCompletionSource;
+        if (!_autoLaunchBetterGiPending && oneDragonConfigName is null)
         {
             return;
         }
 
         _autoLaunchBetterGiPending = false;
+        _pendingOneDragonConfigName = null;
         await Task.Yield();
         if (_disposed)
         {
@@ -637,11 +710,19 @@ public sealed class ChildSessionService : IDisposable
             RefreshState();
             if (ConnectedState == 1 && ChildSessionId is not null)
             {
-                await LaunchBetterGiCoreAsync(isAutomatic: true);
+                await LaunchBetterGiCoreAsync(
+                    isAutomatic: true,
+                    oneDragonConfigName: oneDragonConfigName);
+                if (oneDragonConfigName is not null)
+                {
+                    HideForBackgroundTask();
+                }
+                launchCompletionSource?.TrySetResult(true);
             }
         }
         catch (Exception exception) when (IsExpectedChildSessionException(exception))
         {
+            launchCompletionSource?.TrySetException(exception.GetBaseException());
             RefreshState($"自动启动 BetterGI 失败：{exception.GetBaseException().Message}");
         }
     }
@@ -775,6 +856,9 @@ public sealed class ChildSessionService : IDisposable
     {
         _lastConnectionFailure = e;
         _autoLaunchBetterGiPending = false;
+        _pendingOneDragonConfigName = null;
+        _pendingLaunchCompletionSource?.TrySetException(
+            new InvalidOperationException(e.Message));
         _initialConnectionRetriesRemaining = 0;
         _connectionAttemptCompletionSource?.TrySetResult(false);
         _logger.LogError(
@@ -816,6 +900,13 @@ public sealed class ChildSessionService : IDisposable
         {
             // ActiveX 正在自行断开时可能返回 COM 错误，仍可继续注销 Child Session。
         }
+    }
+
+    private void HideForBackgroundTask()
+    {
+        _desktopWindow?.Hide();
+        Application.Current.MainWindow?.Hide();
+        RefreshState("桌面分身任务已启动，主控窗口已隐藏");
     }
 
     private static bool IsExpectedChildSessionException(Exception exception)

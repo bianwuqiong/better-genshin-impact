@@ -1,3 +1,4 @@
+using BetterGenshinImpact.Core.Config;
 using BetterGenshinImpact.Core.Recognition;
 using BetterGenshinImpact.Core.Recognition.OpenCv;
 using BetterGenshinImpact.Core.Script.Dependence;
@@ -871,6 +872,17 @@ public class TpTask
                 out var failureReason,
                 out var failure))
         {
+            Logger.LogInformation(
+                "传送点点击：id={Id} map={Map} world=({WorldX:0.0},{WorldY:0.0}) raw=({RawX:0.0},{RawY:0.0}) resolved=({ClickX:0.0},{ClickY:0.0}) zoom={Zoom:0.00}",
+                target.TargetTp.Id,
+                target.MapName,
+                target.X,
+                target.Y,
+                clickView.ClickX,
+                clickView.ClickY,
+                clickX,
+                clickY,
+                clickView.ZoomLevel);
             clickCapture.ClickTo(clickX, clickY);
             return null;
         }
@@ -879,6 +891,14 @@ public class TpTask
         // 若面板未出现，调用方会在不移动地图的前提下回退到本次已算出的候选校正点。
         if (failure == AbsoluteMapClickFailure.NeighborSafetyDistance)
         {
+            Logger.LogInformation(
+                "传送点点击使用原始坐标并保留校正候选：id={Id} raw=({RawX:0.0},{RawY:0.0}) candidate=({ClickX:0.0},{ClickY:0.0}) zoom={Zoom:0.00}",
+                target.TargetTp.Id,
+                clickView.ClickX,
+                clickView.ClickY,
+                clickX,
+                clickY,
+                clickView.ZoomLevel);
             clickCapture.ClickTo(clickView.ClickX, clickView.ClickY);
             return new AbsoluteMapClickCandidate(clickX, clickY);
         }
@@ -941,6 +961,19 @@ public class TpTask
         }
 
         // 面板始终未出现：点空，或点到未激活点/标点且未弹出可交互面板。
+        try
+        {
+            using var failureCapture = CaptureToRectArea();
+            var screenshotPath = Global.Absolute(
+                $"log\\teleport-panel-not-opened-{target.TargetTp.Id}-{DateTime.Now:yyyyMMdd-HHmmssfff}.png");
+            Cv2.ImWrite(screenshotPath, failureCapture.SrcMat);
+            Logger.LogWarning("传送交互面板未出现，诊断截图已保存：{ScreenshotPath}", screenshotPath);
+        }
+        catch (Exception screenshotException)
+        {
+            Logger.LogWarning(screenshotException, "保存传送失败诊断截图时出错");
+        }
+
         throw new TeleportPanelNotOpenedException("点击传送点后未出现交互面板，可能是传送点未激活");
     }
 

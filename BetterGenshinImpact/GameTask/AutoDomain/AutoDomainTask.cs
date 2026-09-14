@@ -42,12 +42,13 @@ using BetterGenshinImpact.GameTask.Common.Reward;
 using Compunet.YoloSharp;
 using Microsoft.Extensions.DependencyInjection;
 using BetterGenshinImpact.GameTask.AutoFight;
+using Newtonsoft.Json;
 
 namespace BetterGenshinImpact.GameTask.AutoDomain;
 
 public partial class AutoDomainTask : ISoloTask<Dictionary<string, int>>
 {
-    private static readonly TimeSpan PetrifiedTreeSearchTimeout = TimeSpan.FromSeconds(90);
+    private static readonly TimeSpan PetrifiedTreeSearchTimeout = TimeSpan.FromSeconds(45);
 
     public string Name => "自动秘境";
 
@@ -60,6 +61,7 @@ public partial class AutoDomainTask : ISoloTask<Dictionary<string, int>>
     private readonly CombatScriptBag? _combatScriptBag;
     private readonly string? _jsonCombatStrategyPath;
     private readonly Dictionary<string, int> _rewardSummary = new();
+    private int _verifiedRewardRoundCount;
 
     private CancellationToken _ct;
 
@@ -166,6 +168,7 @@ public partial class AutoDomainTask : ISoloTask<Dictionary<string, int>>
     {
         _ct = ct;
         _rewardSummary.Clear();
+        _verifiedRewardRoundCount = 0;
 
         Init();
         Notify.Event(NotificationEvent.DomainStart).Success("自动秘境启动");
@@ -207,6 +210,10 @@ public partial class AutoDomainTask : ISoloTask<Dictionary<string, int>>
 
         await ArtifactSalvage();
         Notify.Event(NotificationEvent.DomainEnd).Success("自动秘境结束");
+        if (_verifiedRewardRoundCount > 0)
+        {
+            EmitDomainSuccessEvent();
+        }
         return new Dictionary<string, int>(_rewardSummary);
     }
 
@@ -935,14 +942,30 @@ public partial class AutoDomainTask : ISoloTask<Dictionary<string, int>>
         Simulation.SendInput.Mouse.MiddleButtonClick();
         Sleep(900, _ct);
 
-        // 左右移动直到石化古树位于屏幕中心任务
-        var moveAvatarTask = MoveAvatarHorizontallyTask(treeCts, moveAvatarStartGate, telemetry);
+        // 先检查当前视角。看得见树时直接转向；看不见就立即使用小地图对东，
+        // 避免在每一步旋转后执行昂贵的 YOLO 推理。
+        if (await TryFindPetrifiedTreeInCurrentView(telemetry))
+        {
+            Logger.LogInformation("已在当前视角找到石化古树，跳过固定朝东搜索");
+            return;
+        }
+
+        Logger.LogInformation("当前视角未找到石化古树，立即回退到固定朝东搜索");
+
+        // 相机对东后检测古树，首次命中即停止锁向并直接转动相机居中。
+        var moveAvatarTask = DetectAndCenterPetrifiedTreeTask(treeCts, moveAvatarStartGate, telemetry);
 
         // 锁定东方向视角线程
         var lockCameraToEastTask = LockCameraToEastTask(treeCts, moveAvatarStartGate, telemetry);
         try
         {
             await Task.WhenAll(moveAvatarTask, lockCameraToEastTask);
+        }
+        catch
+        {
+            using var failureCapture = CaptureToRectArea();
+            TrySavePetrifiedTreeDiagnostic(failureCapture, "fallback-failed");
+            throw;
         }
         finally
         {
@@ -954,7 +977,70 @@ public partial class AutoDomainTask : ISoloTask<Dictionary<string, int>>
         }
     }
 
-    private Task MoveAvatarHorizontallyTask(CancellationTokenSource treeCts, ManualResetEventSlim startGate,
+    private async Task<bool> TryFindPetrifiedTreeInCurrentView(PetrifiedTreeSearchTelemetry telemetry)
+    {
+        var captureArea = TaskContext.Instance().SystemInfo.ScaleMax1080PCaptureRect;
+        using (var capture = CaptureToRectArea())
+        {
+            TrySavePetrifiedTreeDiagnostic(capture, "current-view");
+            var treeRect = DetectTree(capture);
+            if (treeRect == default)
+            {
+                Logger.LogInformation("当前视角未检测到石化古树，检测耗时={Elapsed}ms",
+                    telemetry.ElapsedMilliseconds);
+                return false;
+            }
+
+            telemetry.FirstTreeDetectionMilliseconds ??= telemetry.ElapsedMilliseconds;
+            TrySavePetrifiedTreeDiagnostic(capture, "current-view-detected");
+            TurnCameraTowardPetrifiedTree(treeRect, captureArea.Width, "当前视角");
+        }
+
+        await Delay(180, _ct);
+        return true;
+    }
+
+    private void TurnCameraTowardPetrifiedTree(Rect treeRect, int captureWidth, string source)
+    {
+        var treeMiddleX = treeRect.X + treeRect.Width / 2;
+        var offset = treeMiddleX - captureWidth / 2;
+        var centerTolerance = Math.Max(30, captureWidth / 20);
+        if (Math.Abs(offset) <= centerTolerance)
+        {
+            Logger.LogInformation("{Source}检测到石化古树已居中：offset={Offset}px", source, offset);
+            return;
+        }
+
+        // CameraOrientation 的既有换算约为每度 2 个鼠标单位；按约 90° 水平视野
+        // 将屏幕像素偏差换成较小的相机位移，随后 WalkToPressF 直行接近古树。
+        var mouseDelta = Math.Clamp(
+            (int)Math.Round(offset * 180.0 / captureWidth),
+            -120,
+            120);
+        Simulation.SendInput.Mouse.MoveMouseBy(mouseDelta, 0);
+        Logger.LogInformation(
+            "{Source}检测到石化古树并转向：offset={Offset}px，mouseDelta={MouseDelta}",
+            source,
+            offset,
+            mouseDelta);
+    }
+
+    private void TrySavePetrifiedTreeDiagnostic(ImageRegion capture, string phase)
+    {
+        try
+        {
+            var screenshotPath = Global.Absolute(
+                $"log\\petrified-tree-{phase}-{DateTime.Now:yyyyMMdd-HHmmssfff}.png");
+            Cv2.ImWrite(screenshotPath, capture.SrcMat);
+            Logger.LogInformation("石化古树搜索诊断截图已保存：{ScreenshotPath}", screenshotPath);
+        }
+        catch (Exception screenshotException)
+        {
+            Logger.LogWarning(screenshotException, "保存石化古树搜索诊断截图时出错");
+        }
+    }
+
+    private Task DetectAndCenterPetrifiedTreeTask(CancellationTokenSource treeCts, ManualResetEventSlim startGate,
         PetrifiedTreeSearchTelemetry telemetry)
     {
         return Task.Run(() =>
@@ -985,6 +1071,30 @@ public partial class AutoDomainTask : ISoloTask<Dictionary<string, int>>
 
                     using var capture = CaptureToRectArea();
                     var treeRect = DetectTree(capture);
+                    if (treeRect != default)
+                    {
+                        telemetry.FirstTreeDetectionMilliseconds ??= telemetry.ElapsedMilliseconds;
+                        if (leftKeyDown)
+                        {
+                            Simulation.SendInput.Keyboard.KeyUp(moveLeftKey);
+                            leftKeyDown = false;
+                        }
+                        if (rightKeyDown)
+                        {
+                            Simulation.SendInput.Keyboard.KeyUp(moveRightKey);
+                            rightKeyDown = false;
+                        }
+
+                        // 停止并行的固定朝东线程，避免它与接下来的目标居中互相拉扯。
+                        treeCts.Cancel();
+                        Sleep(120, _ct);
+                        TurnCameraTowardPetrifiedTree(treeRect, captureArea.Width, "对东回退");
+                        Sleep(180, _ct);
+                        Logger.LogInformation(
+                            "对东回退首次检测到石化古树后已直接转向，总耗时={Elapsed}ms",
+                            telemetry.ElapsedMilliseconds);
+                        break;
+                    }
                     if (treeRect != default)
                     {
                         telemetry.FirstTreeDetectionMilliseconds ??= telemetry.ElapsedMilliseconds;
@@ -1246,53 +1356,94 @@ public partial class AutoDomainTask : ISoloTask<Dictionary<string, int>>
         public long? FirstTreeDetectionMilliseconds { get; set; }
     }
 
+    private async Task<(ImageRegion Capture, ResinStatus Status)?> WaitForResinPrompt()
+    {
+        Exception? lastError = null;
+        for (var attempt = 1; attempt <= 5; attempt++)
+        {
+            await Delay(attempt == 1 ? 900 : 400, _ct);
+            var capture = CaptureToRectArea();
+            if (attempt == 1)
+            {
+                TrySaveRewardDiagnostic(capture, "prompt-first-frame");
+            }
+
+            try
+            {
+                // 树脂选择页顶部一定存在原粹树脂图标。先用模板和小块数字 OCR 判断页面，
+                // 避免旧逻辑每 0.5 秒执行一次全屏文字检测，在 CPU 满载时单次可耗时数秒。
+                var status = ResinStatus.RecogniseFromRegion(
+                    capture,
+                    TaskContext.Instance().SystemInfo,
+                    OcrFactory.Paddle);
+                Logger.LogInformation("第 {Attempt}/5 次检测到树脂选择页", attempt);
+                TrySaveRewardDiagnostic(capture, "prompt-detected");
+                return (capture, status);
+            }
+            catch (Exception e)
+            {
+                lastError = e;
+                if (attempt == 5)
+                {
+                    TrySaveRewardDiagnostic(capture, "prompt-not-detected");
+                }
+                capture.Dispose();
+            }
+        }
+
+        Logger.LogWarning(lastError, "树脂选择页未通过顶部图标识别，将检查是否已直接进入奖励页");
+        return null;
+    }
+
+    private void TrySaveRewardDiagnostic(ImageRegion capture, string phase)
+    {
+        try
+        {
+            var screenshotPath = Global.Absolute(
+                $"log\\domain-reward-{phase}-{DateTime.Now:yyyyMMdd-HHmmssfff}.png");
+            Cv2.ImWrite(screenshotPath, capture.SrcMat);
+            Logger.LogInformation("秘境领奖诊断截图已保存：{ScreenshotPath}", screenshotPath);
+        }
+        catch (Exception screenshotException)
+        {
+            Logger.LogWarning(screenshotException, "保存秘境领奖诊断截图时出错");
+        }
+    }
+
     /// <summary>
     /// 领取奖励
     /// </summary>
     private async Task<bool> GettingTreasure()
     {
         bool isLastTurn = false;
-        // 等待窗口弹出
-        await Delay(300, _ct);
+        var prompt = await WaitForResinPrompt();
+        bool chooseResinPrompt = prompt.HasValue;
 
-        // 1. OCR 直到确认弹出框弹出
-        bool chooseResinPrompt = await NewRetry.WaitForAction(() =>
+        if (prompt is { } detectedPrompt)
         {
-            using var ra = CaptureToRectArea();
-            var regionList = ra.FindMulti(RecognitionObject.Ocr(ra.Width * 0.25, ra.Height * 0.2, ra.Width * 0.5, ra.Height * 0.6));
-            var res = regionList.FirstOrDefault(t => Regex.IsMatch(t.Text, petrifiedTreeString));
-            if (res != null)
+            using var ra3 = detectedPrompt.Capture;
+            var resinStatus = detectedPrompt.Status;
+            // 页面确认后只做一次全屏 OCR，后续树脂选择复用同一批结果。
+            var textListInPrompt = ra3.FindMulti(RecognitionObject.Ocr(
+                ra3.Width * 0.25,
+                ra3.Height * 0.2,
+                ra3.Width * 0.5,
+                ra3.Height * 0.6));
+            Logger.LogInformation(
+                "树脂选择页 OCR：{Texts}",
+                string.Join(" | ", textListInPrompt.Select(t => t.Text.Replace('\r', ' ').Replace('\n', ' '))));
+
+            if (textListInPrompt.Any(t =>
+                    Regex.IsMatch(t.Text, insufficientCountString, RegexOptions.IgnoreCase) ||
+                    Regex.IsMatch(t.Text, replenishResinString, RegexOptions.IgnoreCase)))
             {
-                // 解决水龙王按下左键后没松开，然后后续点击按下就没反应了，界面上点一下
-                res.Click();
-                return true;
+                Logger.LogInformation("自动秘境：原粹树脂已用尽，退出秘境");
+                await ExitDomain();
+                return false;
             }
-
-            return false;
-        }, _ct, 10, 500);
-        Debug.WriteLine("识别到选择树脂页");
-        await Delay(800, _ct);
-
-        // 再 OCR 一次，弹出框，确认当前是否有原粹树脂
-        using var ra2 = CaptureToRectArea();
-        var textListInPrompt = ra2.FindMulti(RecognitionObject.Ocr(ra2.Width * 0.25, ra2.Height * 0.2, ra2.Width * 0.5, ra2.Height * 0.6));
-        if (textListInPrompt.Any(t => Regex.IsMatch(t.Text, insufficientCountString, RegexOptions.IgnoreCase) || Regex.IsMatch(t.Text, replenishResinString, RegexOptions.IgnoreCase)))
-        {
-            // 没有原粹树脂，直接退出秘境
-            Logger.LogInformation("自动秘境：原粹树脂已用尽，退出秘境");
-            await ExitDomain();
-            return false;
-        }
-
-        if (chooseResinPrompt)
-        {
-            using var ra3 = CaptureToRectArea();
 
             if (!_taskParam.SpecifyResinUse)
             {
-                // 自动刷干树脂
-                // 识别树脂状况
-                var resinStatus = ResinStatus.RecogniseFromRegion(ra3, TaskContext.Instance().SystemInfo, OcrFactory.Paddle);
                 resinStatus.Print(Logger);
 
                 if (resinStatus is { CondensedResinCount: <= 0, OriginalResinCount: < 20 })
@@ -1305,12 +1456,12 @@ public partial class AutoDomainTask : ISoloTask<Dictionary<string, int>>
                 bool resinUsed = false;
                 if (resinStatus.CondensedResinCount > 0)
                 {
-                    (resinUsed, _) = PressUseResin(ra3, "浓缩树脂");
+                    (resinUsed, _) = PressUseResin(textListInPrompt, "浓缩树脂");
                     resinStatus.CondensedResinCount -= 1;
                 }
                 else if (resinStatus.OriginalResinCount >= 20)
                 {
-                    (resinUsed, var num) = PressUseResin(ra3, "原粹树脂");
+                    (resinUsed, var num) = PressUseResin(textListInPrompt, "原粹树脂");
                     resinStatus.OriginalResinCount -= num;
                 }
 
@@ -1330,7 +1481,6 @@ public partial class AutoDomainTask : ISoloTask<Dictionary<string, int>>
             else
             {
                 // 指定使用树脂
-                var textListInPrompt2 = ra3.FindMulti(RecognitionObject.Ocr(ra3.Width * 0.25, ra3.Height * 0.2, ra3.Width * 0.5, ra3.Height * 0.6));
                 // 按优先级使用
                 int successCount = 0;
                 foreach (var record in _resinPriorityListWhenSpecifyUse)
@@ -1357,7 +1507,7 @@ public partial class AutoDomainTask : ISoloTask<Dictionary<string, int>>
                             }
                         }
 
-                        var (success, _) = PressUseResin(textListInPrompt2, record.Name);
+                        var (success, _) = PressUseResin(textListInPrompt, record.Name);
                         if (success)
                         {
                             record.RemainCount -= 1;
@@ -1386,8 +1536,22 @@ public partial class AutoDomainTask : ISoloTask<Dictionary<string, int>>
         }
         else
         {
-            // 如果没有选择树脂的提示，说明只有原粹树脂
-            // 继续向下执行
+            // 单一树脂旧界面可能会直接进入奖励结果页；除此之外一律失败关闭，
+            // 不把未知界面升级为领奖成功，也不继续盲点。
+            if (!await WaitForRewardResultReady())
+            {
+                using var unknownCapture = CaptureToRectArea();
+                var unknownTexts = unknownCapture.FindMulti(RecognitionObject.Ocr(
+                    unknownCapture.Width * 0.25,
+                    unknownCapture.Height * 0.2,
+                    unknownCapture.Width * 0.5,
+                    unknownCapture.Height * 0.6));
+                Logger.LogWarning(
+                    "未识别树脂选择页或奖励页，当前 OCR：{Texts}",
+                    string.Join(" | ", unknownTexts.Select(t => t.Text.Replace('\r', ' ').Replace('\n', ' '))));
+                TrySaveRewardDiagnostic(unknownCapture, "unknown-page");
+                throw new RetryException("未识别秘境领奖界面，已停止以避免误点或误记奖励");
+            }
         }
         
         Notify.Event(NotificationEvent.DomainReward).Success("自动秘境奖励领取");
@@ -1429,7 +1593,11 @@ public partial class AutoDomainTask : ISoloTask<Dictionary<string, int>>
                         // 真没树脂了还有提示兜底
                         await Delay(900, _ct);
                         using var noResinPromptCapture = CaptureToRectArea();
-                        var textListInNoResinPrompt = noResinPromptCapture.FindMulti(RecognitionObject.Ocr(ra2.Width * 0.25, ra2.Height * 0.2, ra2.Width * 0.5, ra2.Height * 0.6));
+                        var textListInNoResinPrompt = noResinPromptCapture.FindMulti(RecognitionObject.Ocr(
+                            noResinPromptCapture.Width * 0.25,
+                            noResinPromptCapture.Height * 0.2,
+                            noResinPromptCapture.Width * 0.5,
+                            noResinPromptCapture.Height * 0.6));
                         if (textListInNoResinPrompt.Any(t => Regex.IsMatch(t.Text, retryDomainPromptPattern)))
                         {
                             var cancelBtn = textListInNoResinPrompt.FirstOrDefault(t => Regex.IsMatch(t.Text, cancelButtonString));
@@ -1474,6 +1642,7 @@ public partial class AutoDomainTask : ISoloTask<Dictionary<string, int>>
 
             if (rewards.Count > 0)
             {
+                _verifiedRewardRoundCount++;
                 Logger.LogInformation("自动秘境：本轮奖励识别结果 {Rewards}",
                     string.Join(", ", rewards.Select(r => $"{r.Key} x{r.Value}")));
             }
@@ -1486,6 +1655,21 @@ public partial class AutoDomainTask : ISoloTask<Dictionary<string, int>>
         {
             Logger.LogWarning(e, "自动秘境：奖励识别失败，已跳过本轮奖励汇总");
         }
+    }
+
+    private void EmitDomainSuccessEvent()
+    {
+        var payload = JsonConvert.SerializeObject(new
+        {
+            task = "自动秘境",
+            status = "success",
+            evidenceVerified = true,
+            domainName = _taskParam.DomainName,
+            verifiedRewardRounds = _verifiedRewardRoundCount,
+            rewardKinds = _rewardSummary.Count,
+            rewardItemCount = _rewardSummary.Values.Sum()
+        });
+        Logger.LogInformation("[AUTO_GAME_EVENT] " + payload);
     }
 
     private async Task<bool> WaitForRewardResultReady()

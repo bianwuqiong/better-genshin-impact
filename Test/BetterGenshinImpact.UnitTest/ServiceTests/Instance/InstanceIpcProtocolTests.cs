@@ -3,6 +3,7 @@ using System.Diagnostics;
 using System.IO.Pipes;
 using BetterGenshinImpact.Core.Monitor;
 using BetterGenshinImpact.Helpers;
+using BetterGenshinImpact.Service.ChildSession;
 using BetterGenshinImpact.Service.Instance;
 
 namespace BetterGenshinImpact.UnitTest.ServiceTests.Instance;
@@ -74,6 +75,33 @@ public class InstanceIpcProtocolTests
         Assert.Equal(BetterGiInstanceType.Primary, options.InstanceType);
         Assert.False(options.HasExplicitInstanceType);
         Assert.Equal(CommandLineAction.None, options.Action);
+    }
+
+    [Fact]
+    public void CommandLineParser_ShouldRecognizeChildSessionOneDragonBeforeLooseOneDragonMatch()
+    {
+        var options = CommandLineOptions.Parse(
+        [
+            "BetterGI.exe",
+            "--child-session-one-dragon",
+            "AutoGame_20260913T120000-abcd1234"
+        ]);
+
+        Assert.Equal(CommandLineAction.StartChildSessionOneDragon, options.Action);
+        Assert.Equal("AutoGame_20260913T120000-abcd1234", options.OneDragonConfigName);
+        Assert.Equal(BetterGiInstanceType.Primary, options.InstanceType);
+    }
+
+    [Fact]
+    public void ChildSessionLauncher_ShouldBuildRestrictedOneDragonArguments()
+    {
+        var arguments = ChildSessionProcessLauncher.CreateBetterGiArguments("AutoGame_safe-1");
+
+        Assert.Equal(
+            "--instance childSession --startOneDragon \"AutoGame_safe-1\"",
+            arguments);
+        Assert.Throws<ArgumentException>(
+            () => ChildSessionProcessLauncher.CreateBetterGiArguments("unsafe name & command"));
     }
 
     [Fact]

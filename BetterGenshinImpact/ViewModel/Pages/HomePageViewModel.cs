@@ -169,10 +169,44 @@ public partial class HomePageViewModel : ViewModel, IDisposable
         if (commandLineOptions.Action == CommandLineAction.Start)
         {
             _ = OnStartTriggerAsync();
+            return;
         }
 
-        // TODO: 多实例独立任务选择面板入口预留。
-        // 后续在此判断可用子实例，并由选择面板决定 task.* 请求的目标实例。
+        if (commandLineOptions.Action == CommandLineAction.StartChildSessionOneDragon)
+        {
+            if (!InstanceBootstrap.Current.Context.IsRoot)
+            {
+                _logger.LogError("桌面分身一条龙命令只能由 BetterGI 根实例处理。");
+                return;
+            }
+            if (commandLineOptions.OneDragonConfigName is not { } configName)
+            {
+                _logger.LogError("桌面分身一条龙命令缺少配置名称。");
+                return;
+            }
+
+            _ = StartChildSessionOneDragonAsync(configName);
+            return;
+        }
+
+        if (commandLineOptions.Action == CommandLineAction.StartOneDragon
+            && InstanceBootstrap.Current.Context.InstanceType == BetterGiInstanceType.ChildSession)
+        {
+            App.GetService<OneDragonFlowViewModel>()?.HandleActivation(commandLineOptions);
+        }
+    }
+
+    private async Task StartChildSessionOneDragonAsync(string configName)
+    {
+        try
+        {
+            await _childSessionService.StartAndLaunchOneDragonAsync(configName);
+        }
+        catch (Exception exception)
+        {
+            _logger.LogError(exception, "启动桌面分身一条龙失败：{ConfigName}", configName);
+            Toast.Error($"启动桌面分身一条龙失败：{exception.GetBaseException().Message}");
+        }
     }
 
     private void OnClosed()

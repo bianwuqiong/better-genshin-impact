@@ -4,6 +4,7 @@ using System.IO;
 using System.Reflection;
 using System.Runtime.InteropServices;
 using System.Security.Principal;
+using System.Text.RegularExpressions;
 using System.Threading.Tasks;
 using BetterGenshinImpact.Helpers;
 using BetterGenshinImpact.Service.Instance;
@@ -17,11 +18,15 @@ internal static class ChildSessionProcessLauncher
     private const int TaskLogonInteractiveToken = 3;
     private const int TaskRunLevelHighest = 1;
     private const int TaskRunUseSessionId = 0x4;
+    private static readonly Regex SafeOneDragonConfigName = new(
+        "^[A-Za-z0-9_-]+$",
+        RegexOptions.CultureInvariant);
 
     internal static Task LaunchBetterGiAsync(
-        uint childSessionId)
+        uint childSessionId,
+        string? oneDragonConfigName = null)
     {
-        var startInfo = CreateBetterGiStartInfo();
+        var startInfo = CreateBetterGiStartInfo(oneDragonConfigName);
         return LaunchElevatedAsync(
             childSessionId,
             startInfo.ExecutablePath,
@@ -53,7 +58,25 @@ internal static class ChildSessionProcessLauncher
                 workingDirectory));
     }
 
-    private static ProcessLaunchInfo CreateBetterGiStartInfo()
+    internal static string CreateBetterGiArguments(string? oneDragonConfigName)
+    {
+        var arguments = $"{CommandLineOptions.InstanceArgument} childSession";
+        if (oneDragonConfigName is null)
+        {
+            return arguments;
+        }
+
+        if (!SafeOneDragonConfigName.IsMatch(oneDragonConfigName))
+        {
+            throw new ArgumentException(
+                "一条龙配置名称只能包含字母、数字、下划线和连字符。",
+                nameof(oneDragonConfigName));
+        }
+
+        return $"{arguments} --startOneDragon {QuoteArgument(oneDragonConfigName)}";
+    }
+
+    private static ProcessLaunchInfo CreateBetterGiStartInfo(string? oneDragonConfigName)
     {
         var currentProcessPath = Environment.ProcessPath
             ?? throw new InvalidOperationException("无法取得 BetterGI 程序路径。");
@@ -74,13 +97,13 @@ internal static class ChildSessionProcessLauncher
             return new ProcessLaunchInfo(
                 fullProcessPath,
                 $"{QuoteArgument(Path.GetFullPath(entryAssemblyPath))} "
-                + $"{CommandLineOptions.InstanceArgument} childSession",
+                + CreateBetterGiArguments(oneDragonConfigName),
                 AppContext.BaseDirectory);
         }
 
         return new ProcessLaunchInfo(
             ValidateExecutablePath(fullProcessPath),
-            $"{CommandLineOptions.InstanceArgument} childSession",
+            CreateBetterGiArguments(oneDragonConfigName),
             AppContext.BaseDirectory);
     }
 

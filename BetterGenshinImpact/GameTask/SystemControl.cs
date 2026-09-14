@@ -1,5 +1,6 @@
 using BetterGenshinImpact.View.Windows;
 using BetterGenshinImpact.Helpers;
+using BetterGenshinImpact.Core.Script;
 using BetterGenshinImpact.Service.Instance;
 using Microsoft.Extensions.Logging;
 using System;
@@ -11,6 +12,9 @@ using System.Text;
 using System.Text.RegularExpressions;
 using System.Threading;
 using System.Threading.Tasks;
+using System.Runtime.InteropServices;
+using BetterGenshinImpact.Core.Simulator;
+using BetterGenshinImpact.GameTask.Model.Area;
 using Vanara.PInvoke;
 
 namespace BetterGenshinImpact.GameTask;
@@ -21,12 +25,13 @@ public class SystemControl
 
     private const string ChildSessionGenshinStartArgs =
         "-popupwindow -screen-width 1920 -screen-height 1080";
+    private static readonly TimeSpan GameWindowStartupTimeout = TimeSpan.FromSeconds(120);
 
     private static readonly Regex ChildSessionOverriddenArgumentRegex = new(
         @"(?<!\S)(?:-popupwindow|-screen-(?:width|height)(?:\s*=\s*(?:""[^""]*""|\S+)|\s+(?:""[^""]*""|(?!-)\S+))?)(?=\s|$)",
         RegexOptions.IgnoreCase | RegexOptions.CultureInvariant | RegexOptions.Compiled);
 
-    public static nint FindGenshinImpactHandle()
+    public static nint FindGenshinImpactHandle(bool logMiss = true)
     {
         var processNames = TaskContext.Instance().GetGenshinGameProcessNameList();
 
@@ -52,7 +57,10 @@ public class SystemControl
 
             // 仍未命中，回退原版逻辑（进程名 + MainWindowHandle）
             handle = FindHandleByProcessName(processNames.ToArray());
-            Logger.LogInformation("[窗口检测] 未命中，回退旧逻辑，句柄={Handle}", handle);
+            if (logMiss || handle != 0)
+            {
+                Logger.LogInformation("[窗口检测] 未命中，回退旧逻辑，句柄={Handle}", handle);
+            }
             return handle;
         }
 
@@ -233,21 +241,65 @@ public class SystemControl
             });
         }
 
-        for (var i = 0; i < 5; i++)
+        var windowWait = Stopwatch.StartNew();
+        var nextProgressLog = TimeSpan.Zero;
+        while (windowWait.Elapsed < GameWindowStartupTimeout)
         {
-            var handle = FindGenshinImpactHandle();
+            if (CancellationContext.Instance.IsCancellationRequested)
+            {
+                Logger.LogInformation("等待原神窗口期间收到停止指令");
+                return IntPtr.Zero;
+            }
+
+            var handle = FindGenshinImpactHandle(logMiss: false);
             if (handle != 0)
             {
                 await Task.Delay(2333);
-                handle = FindGenshinImpactHandle();
-                await Task.Delay(2577);
-                return handle;
+                handle = FindGenshinImpactHandle(logMiss: false);
+                if (handle != 0)
+                {
+                    await Task.Delay(2577);
+                    // Unity 在窗口从未获得前台焦点时可能长时间限制初始化。
+                    // 这里只激活一次；后续等待不会重复抢占焦点或移动鼠标。
+                    var activated = ActivateWindow(handle);
+                    if (activated)
+                    {
+                        await Task.Delay(250);
+                        ClickWindowCenterWithoutMovingCursor(handle);
+                        Logger.LogInformation("原神窗口已验证前台激活并执行一次性焦点点击，鼠标位置已恢复");
+                    }
+                    else
+                    {
+                        Logger.LogWarning("原神窗口前台激活验证失败；不会伪报成功，自动开门将继续有限重试");
+                    }
+                    Logger.LogInformation(
+                        "原神窗口已稳定出现，启动等待耗时 {ElapsedSeconds:F1} 秒，句柄={Handle}",
+                        windowWait.Elapsed.TotalSeconds,
+                        handle);
+                    return handle;
+                }
             }
 
-            await Task.Delay(5577);
+            if (windowWait.Elapsed >= nextProgressLog)
+            {
+                Logger.LogInformation(
+                    "正在等待原神窗口出现：{ElapsedSeconds:F0}/{TimeoutSeconds:F0} 秒",
+                    windowWait.Elapsed.TotalSeconds,
+                    GameWindowStartupTimeout.TotalSeconds);
+                nextProgressLog = windowWait.Elapsed + TimeSpan.FromSeconds(10);
+            }
+
+            await Task.Delay(1000);
         }
 
-        return FindGenshinImpactHandle();
+        var finalHandle = FindGenshinImpactHandle(logMiss: false);
+        if (finalHandle == 0)
+        {
+            Logger.LogWarning(
+                "等待原神窗口超时：{TimeoutSeconds:F0} 秒内未取得可见窗口",
+                GameWindowStartupTimeout.TotalSeconds);
+        }
+        return finalHandle;
     }
 
     internal static string BuildGenshinStartArguments(string? configuredArguments, bool isChildSession)
@@ -415,10 +467,106 @@ public class SystemControl
         return new RECT(left, top, right, bottom);
     }
 
-    public static void ActivateWindow(nint hWnd)
+    public static bool ActivateWindow(nint hWnd)
     {
+        if (!User32.IsWindow(hWnd))
+        {
+            return false;
+        }
+
         User32.ShowWindow(hWnd, ShowWindowCommand.SW_RESTORE);
-        User32.SetForegroundWindow(hWnd);
+        var foreground = FocusNative.GetForegroundWindow();
+        var currentThread = FocusNative.GetCurrentThreadId();
+        var targetThread = FocusNative.GetWindowThreadProcessId(hWnd, out _);
+        var foregroundThread = foreground == 0
+            ? 0
+            : FocusNative.GetWindowThreadProcessId(foreground, out _);
+        var attachedTarget = false;
+        var attachedForeground = false;
+        try
+        {
+            if (targetThread != 0 && targetThread != currentThread)
+            {
+                attachedTarget = FocusNative.AttachThreadInput(currentThread, targetThread, true);
+            }
+            if (foregroundThread != 0 && foregroundThread != currentThread && foregroundThread != targetThread)
+            {
+                attachedForeground = FocusNative.AttachThreadInput(currentThread, foregroundThread, true);
+            }
+
+            for (var attempt = 1; attempt <= 3; attempt++)
+            {
+                _ = FocusNative.BringWindowToTop(hWnd);
+                _ = FocusNative.SetActiveWindow(hWnd);
+                _ = FocusNative.SetFocus(hWnd);
+                _ = FocusNative.SetForegroundWindow(hWnd);
+                if (FocusNative.GetForegroundWindow() == hWnd)
+                {
+                    return true;
+                }
+                Thread.Sleep(100);
+            }
+        }
+        finally
+        {
+            if (attachedForeground)
+            {
+                _ = FocusNative.AttachThreadInput(currentThread, foregroundThread, false);
+            }
+            if (attachedTarget)
+            {
+                _ = FocusNative.AttachThreadInput(currentThread, targetThread, false);
+            }
+        }
+
+        return FocusNative.GetForegroundWindow() == hWnd;
+    }
+
+    private static void ClickWindowCenterWithoutMovingCursor(nint hWnd)
+    {
+        var captureRect = GetCaptureRect(hWnd);
+        _ = User32.GetCursorPos(out var originalCursorPosition);
+        try
+        {
+            DesktopRegion.DesktopRegionClick(
+                captureRect.Left + captureRect.Width / 2.0,
+                captureRect.Top + captureRect.Height / 2.0);
+        }
+        finally
+        {
+            _ = User32.SetCursorPos(originalCursorPosition.X, originalCursorPosition.Y);
+        }
+    }
+
+    private static class FocusNative
+    {
+        [DllImport("kernel32.dll")]
+        internal static extern uint GetCurrentThreadId();
+
+        [DllImport("user32.dll")]
+        internal static extern nint GetForegroundWindow();
+
+        [DllImport("user32.dll", SetLastError = true)]
+        internal static extern uint GetWindowThreadProcessId(nint hWnd, out uint processId);
+
+        [DllImport("user32.dll", SetLastError = true)]
+        [return: MarshalAs(UnmanagedType.Bool)]
+        internal static extern bool AttachThreadInput(uint idAttach, uint idAttachTo,
+            [MarshalAs(UnmanagedType.Bool)] bool attach);
+
+        [DllImport("user32.dll")]
+        [return: MarshalAs(UnmanagedType.Bool)]
+        internal static extern bool BringWindowToTop(nint hWnd);
+
+        [DllImport("user32.dll")]
+        internal static extern nint SetActiveWindow(nint hWnd);
+
+        [DllImport("user32.dll")]
+        internal static extern nint SetFocus(nint hWnd);
+
+        [DllImport("user32.dll")]
+        [return: MarshalAs(UnmanagedType.Bool)]
+        internal static extern bool SetForegroundWindow(nint hWnd);
     }
 
     public static void ActivateWindow()
