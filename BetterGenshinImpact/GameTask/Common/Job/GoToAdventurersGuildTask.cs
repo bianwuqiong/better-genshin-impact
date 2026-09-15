@@ -14,6 +14,7 @@ using Vanara.PInvoke;
 using static BetterGenshinImpact.GameTask.Common.TaskControl;
 using Microsoft.Extensions.Localization;
 using BetterGenshinImpact.Helpers;
+using BetterGenshinImpact.GameTask.GameLoading;
 using System.Globalization;
 
 namespace BetterGenshinImpact.GameTask.Common.Job;
@@ -22,7 +23,7 @@ public class GoToAdventurersGuildTask
 {
     public string Name => "前往冒险家协会领取奖励";
 
-    private readonly int _retryTimes = 1;
+    private readonly int _retryTimes = 2;
 
     private readonly ChooseTalkOptionTask _chooseTalkOptionTask = new();
 
@@ -42,22 +43,28 @@ public class GoToAdventurersGuildTask
     public async Task Start(string country, CancellationToken ct, string? dailyRewardPartyName = null ,bool onlyDoOnce = false)
     {
         Logger.LogInformation("→ {Name} 开始", Name);
+        var preparationCompleted = false;
         for (int i = 0; i < _retryTimes; i++)
         {
             try
             {
-                // 如果有好感队伍名称，先切换到好感队伍
-                if (!string.IsNullOrEmpty(dailyRewardPartyName))
+                if (!await EnsureMainUiBeforeGuildPathAsync(ct))
                 {
-                    await new SwitchPartyTask().Start(dailyRewardPartyName, ct);
+                    throw new Exception("网络波动后未能恢复到游戏主界面");
                 }
-
-                if (!onlyDoOnce)
+                if (!preparationCompleted)
                 {
-                    // F1领取奖励
-                    await new ClaimEncounterPointsRewardsTask().Start(ct);
-                }
+                    if (!string.IsNullOrEmpty(dailyRewardPartyName))
+                    {
+                        await new SwitchPartyTask().Start(dailyRewardPartyName, ct);
+                    }
 
+                    if (!onlyDoOnce)
+                    {
+                        await new ClaimEncounterPointsRewardsTask().Start(ct);
+                    }
+                    preparationCompleted = true;
+                }
                 await DoOnce(country, ct);
                 break;
             }
@@ -72,12 +79,28 @@ public class GoToAdventurersGuildTask
                 else
                 {
                     await Delay(1000, ct);
-                    Logger.LogInformation("重试前往冒险家协会领取奖励");
+                    Logger.LogInformation(
+                        "重试当前冒险家协会领取节点；已完成的准备步骤不会重复，"
+                        + "中断中的历练点领取仅按幂等状态恢复");
                 }
             }
         }
 
         Logger.LogInformation("→ {Name} 结束", Name);
+    }
+
+    private static async Task<bool> EnsureMainUiBeforeGuildPathAsync(CancellationToken ct)
+    {
+        using (var capture = CaptureToRectArea())
+        {
+            if (Bv.IsInMainUi(capture))
+            {
+                return true;
+            }
+        }
+
+        Logger.LogWarning("前往冒险家协会前检测到游戏不在主界面，启动网络波动重登恢复");
+        return await GameLoadingTrigger.RecoverToMainUiAfterUnexpectedLogoutAsync(ct, 120);
     }
 
     public async Task DoOnce(string country, CancellationToken ct)

@@ -13,6 +13,7 @@ using System.Text.RegularExpressions;
 using Microsoft.Win32;
 using System.Linq;
 using System.Threading;
+using System.Threading.Tasks;
 using System.Text;
 using Vanara.PInvoke;
 
@@ -70,6 +71,71 @@ public class GameLoadingTrigger : ITaskTrigger
     public void InnerSetEnabled(bool enabled)
     {
         GlobalEnabled = enabled;
+    }
+
+    private void ResetForUnexpectedLogoutRecovery()
+    {
+        _triggerStartTime = DateTime.Now;
+        _prevExecuteTime = DateTime.MinValue;
+        _enterGameClickAttempts = 0;
+        _lastEnterGameClickTime = DateTime.MinValue;
+        _enterGameClickLimitLogged = false;
+        biliLoginClicked = false;
+        GlobalEnabled = _config.AutoEnterGameEnabled;
+    }
+
+    /// <summary>
+    /// 网络波动把游戏送回登录/开门界面后，重新启用已经在首次进入主界面时关闭的自动开门触发器，
+    /// 并等待同一游戏窗口回到主界面。不会启动新进程，也不会重放正在执行的游戏资源操作。
+    /// </summary>
+    public static async Task<bool> RecoverToMainUiAfterUnexpectedLogoutAsync(
+        CancellationToken ct, int timeoutSeconds = 120)
+    {
+        using (var initialCapture = TaskControl.CaptureToRectArea())
+        {
+            if (Bv.IsInMainUi(initialCapture))
+            {
+                return true;
+            }
+        }
+
+        if (GameTaskManager.TriggerDictionary is not { } triggers
+            || !triggers.TryGetValue("GameLoading", out var value)
+            || value is not GameLoadingTrigger trigger
+            || !trigger._config.AutoEnterGameEnabled)
+        {
+            _logger.LogWarning("无法启用网络波动后的自动重登：自动开门触发器不可用");
+            return false;
+        }
+
+        timeoutSeconds = Math.Clamp(timeoutSeconds, 10, 180);
+        trigger.ResetForUnexpectedLogoutRecovery();
+        _logger.LogWarning(
+            "检测到游戏不在主界面，已重新启用自动开门并等待重登，最长 {TimeoutSeconds} 秒",
+            timeoutSeconds);
+        var deadline = DateTime.UtcNow.AddSeconds(timeoutSeconds);
+        while (DateTime.UtcNow < deadline)
+        {
+            ct.ThrowIfCancellationRequested();
+            await TaskControl.Delay(1000, ct);
+            using var capture = TaskControl.CaptureToRectArea();
+            if (Bv.IsInMainUi(capture))
+            {
+                GlobalEnabled = false;
+                _logger.LogInformation("网络波动后的自动重登已恢复到游戏主界面");
+                return true;
+            }
+
+            // OnCapture 会在看见临时可关闭界面时关闭触发器；恢复等待尚未结束时重新打开。
+            if (!GlobalEnabled)
+            {
+                GlobalEnabled = true;
+            }
+        }
+
+        GlobalEnabled = false;
+        _logger.LogWarning("网络波动后 {TimeoutSeconds} 秒内未恢复到游戏主界面", timeoutSeconds);
+        return false;
     }
 
     public void Init()
