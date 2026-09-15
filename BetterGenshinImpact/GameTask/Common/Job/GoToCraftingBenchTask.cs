@@ -131,92 +131,111 @@ public class GoToCraftingBenchTask
     {
         const int maxCondensedResin = 5;
         var initial = await ReadCraftingResinCounts(ct);
-        var current = initial;
         int minResinToKeep = Math.Max(0, SelectedConfig?.MinResinToKeep ?? 0);
-        int totalCrafted = 0;
         Logger.LogInformation(
             "浓缩树脂合成前核验：原粹树脂={OriginalResin}，浓缩树脂={CondensedResin}，保留={MinResinToKeep}",
             initial.OriginalResin, initial.CondensedResin, minResinToKeep);
 
-        // 每次只合成一个并核验库存，再决定是否继续。任何一次动作后结果未知都终止，禁止重放。
-        for (int craftIndex = 0; craftIndex < maxCondensedResin; craftIndex++)
+        var safeUpperBound = ComputeSafeBatchCraftQuantity(
+            initial.OriginalResin, initial.CondensedResin, minResinToKeep, maxCondensedResin);
+        if (safeUpperBound == 0)
         {
-            if (current.CondensedResin >= maxCondensedResin
-                || current.OriginalResin - minResinToKeep < ResinConsumedPerCraft)
-            {
-                break;
-            }
+            EmitCraftingEvent("skipped", initial, initial, 0, minResinToKeep);
+            Logger.LogInformation("无需合成浓缩树脂，库存已核验");
+            return;
+        }
 
-            Logger.LogInformation(
-                "准备单个合成：第 {CraftNumber} 个，核验库存原粹/浓缩={OriginalResin}/{CondensedResin}",
-                totalCrafted + 1, current.OriginalResin, current.CondensedResin);
-            using var actionCapture = CaptureToRectArea();
-            // 把数量降到 1；到达下限后减少按钮不可点击是正常状态。
+        // 游戏进入配方时通常已经选中可合成最大数量。先反复点击增加键抵达界面上限，
+        // 再用 OCR 读取实际可合成量；整个批次只提交一次，减少重复确认和未知结果窗口。
+        using (var maximizeCapture = CaptureToRectArea())
+        {
             for (int i = 0; i < maxCondensedResin; i++)
             {
-                Bv.ClickReduceButton(actionCapture);
+                _ = Bv.ClickAddButton(maximizeCapture);
+                await Delay(120, ct);
+            }
+        }
+        await Delay(250, ct);
+        var displayedMaximum = await ReadStableCraftQuantity(ct);
+        var targetQuantity = ComputeSafeBatchCraftQuantity(
+            initial.OriginalResin, initial.CondensedResin, minResinToKeep, displayedMaximum);
+        if (targetQuantity <= 0)
+        {
+            throw new Exception(
+                $"界面可合成数量为 {displayedMaximum}，但树脂保留与库存校验不允许提交");
+        }
+
+        if (targetQuantity < displayedMaximum)
+        {
+            using var reduceCapture = CaptureToRectArea();
+            for (int i = targetQuantity; i < displayedMaximum; i++)
+            {
+                if (!Bv.ClickReduceButton(reduceCapture))
+                {
+                    throw new Exception("未找到合成数量减少按钮");
+                }
                 await Delay(150, ct);
             }
-            await Delay(300, ct);
-            await VerifySingleCraftQuantity(ct);
-            using var submitCapture = CaptureToRectArea();
-            if (!Bv.ClickWhiteConfirmButton(submitCapture))
+            await Delay(250, ct);
+            var adjustedQuantity = await ReadStableCraftQuantity(ct);
+            if (adjustedQuantity != targetQuantity)
             {
-                throw new Exception("未找到合成确认按钮");
+                throw new Exception(
+                    $"合成数量调整后核验失败：计划={targetQuantity}，界面={adjustedQuantity}");
             }
-            _craftActionCommitted = true;
-
-            CraftingResinCounts after;
-            try
-            {
-                bool resultDismissed = await NewRetry.WaitForAction(() =>
-                {
-                    using var confirmCapture = CaptureToRectArea();
-                    return Bv.ClickBlackConfirmButton(confirmCapture);
-                }, ct, 15, 400);
-                if (!resultDismissed)
-                {
-                    Logger.LogWarning("未识别到合成结果确认按钮，继续通过只读库存变化核验结果");
-                }
-
-                await Delay(1000, ct);
-                after = await ReadCraftingResinCountsAfterCommittedAction(ct);
-            }
-            catch (Exception e)
-            {
-                throw new CraftingOutcomeUnknownException("已点击合成确认，但结果或后库存无法确认；禁止自动重试", e);
-            }
-
-            int expectedOriginal = current.OriginalResin - ResinConsumedPerCraft;
-            int expectedCondensed = current.CondensedResin + 1;
-            if (after.OriginalResin != expectedOriginal || after.CondensedResin != expectedCondensed)
-            {
-                throw new CraftingOutcomeUnknownException(
-                    $"单个合成后库存与计划不符：期望原粹/浓缩={expectedOriginal}/{expectedCondensed}，实际={after.OriginalResin}/{after.CondensedResin}；禁止自动重试");
-            }
-
-            totalCrafted++;
-            current = after;
-            Logger.LogInformation("单个浓缩树脂库存核验通过：累计合成 {Crafted} 个", totalCrafted);
         }
 
-        string status = totalCrafted > 0 ? "success" : "skipped";
-        EmitCraftingEvent(status, initial, current, totalCrafted, minResinToKeep);
-        if (totalCrafted == 0)
+        Logger.LogInformation(
+            "浓缩树脂批量合成数量已连续三帧核验：界面上限={DisplayedMaximum}，本次提交={TargetQuantity}",
+            displayedMaximum,
+            targetQuantity);
+        using var submitCapture = CaptureToRectArea();
+        if (!Bv.ClickWhiteConfirmButton(submitCapture))
         {
-            Logger.LogInformation("无需合成浓缩树脂，库存已核验");
+            throw new Exception("未找到合成确认按钮");
         }
-        else
+        _craftActionCommitted = true;
+
+        CraftingResinCounts after;
+        try
         {
-            Logger.LogInformation("浓缩树脂批次核验完成：共合成 {Crafted} 个", totalCrafted);
+            bool resultDismissed = await NewRetry.WaitForAction(() =>
+            {
+                using var confirmCapture = CaptureToRectArea();
+                return Bv.ClickBlackConfirmButton(confirmCapture);
+            }, ct, 15, 400);
+            if (!resultDismissed)
+            {
+                Logger.LogWarning("未识别到合成结果确认按钮，继续通过只读库存变化核验结果");
+            }
+
+            await Delay(1000, ct);
+            after = await ReadCraftingResinCountsAfterCommittedAction(ct);
         }
+        catch (Exception e)
+        {
+            throw new CraftingOutcomeUnknownException(
+                "已点击批量合成确认，但结果或后库存无法确认；禁止自动重试", e);
+        }
+
+        int expectedOriginal = initial.OriginalResin - targetQuantity * ResinConsumedPerCraft;
+        int expectedCondensed = initial.CondensedResin + targetQuantity;
+        if (after.OriginalResin != expectedOriginal || after.CondensedResin != expectedCondensed)
+        {
+            throw new CraftingOutcomeUnknownException(
+                $"批量合成后库存与计划不符：期望原粹/浓缩={expectedOriginal}/{expectedCondensed}，实际={after.OriginalResin}/{after.CondensedResin}；禁止自动重试");
+        }
+
+        EmitCraftingEvent("success", initial, after, targetQuantity, minResinToKeep);
+        Logger.LogInformation("浓缩树脂批次核验完成：一次提交合成 {Crafted} 个", targetQuantity);
     }
-
-    private async Task VerifySingleCraftQuantity(CancellationToken ct)
+    private async Task<int> ReadStableCraftQuantity(CancellationToken ct)
     {
         string raw = string.Empty;
         int recognizedQuantity = -1;
+        int previousQuantity = -1;
         int consecutiveMatches = 0;
+        int stableQuantity = -1;
         bool verified = await NewRetry.WaitForAction(() =>
         {
             using var capture = CaptureToRectArea();
@@ -229,17 +248,56 @@ public class GoToCraftingBenchTask
             raw = StringUtils.ConvertFullWidthNumToHalfWidth(OcrFactory.Paddle.Ocr(quantityArea.SrcMat)).Trim();
             var match = System.Text.RegularExpressions.Regex.Match(raw, @"\d+");
             recognizedQuantity = match.Success ? StringUtils.TryParseInt(match.Value, -1) : -1;
-            consecutiveMatches = recognizedQuantity == 1 ? consecutiveMatches + 1 : 0;
-            return consecutiveMatches >= 3;
+            if (recognizedQuantity is < 1 or > 5)
+            {
+                previousQuantity = -1;
+                consecutiveMatches = 0;
+                return false;
+            }
+
+            consecutiveMatches = recognizedQuantity == previousQuantity ? consecutiveMatches + 1 : 1;
+            previousQuantity = recognizedQuantity;
+            if (consecutiveMatches < 3)
+            {
+                return false;
+            }
+
+            stableQuantity = recognizedQuantity;
+            return true;
         }, ct, 15, 200);
-        if (!verified)
+        if (!verified || stableQuantity < 1)
         {
-            throw new Exception($"合成数量未能在确认前稳定核验为 1：OCR='{raw}'，数量={recognizedQuantity}");
+            throw new Exception(
+                $"合成数量未能在确认前稳定核验：OCR='{raw}'，数量={recognizedQuantity}");
         }
 
-        Logger.LogInformation("合成数量已连续三帧核验为 1");
+        return stableQuantity;
     }
 
+    internal static int ComputeSafeBatchCraftQuantity(
+        int originalResin, int condensedResin, int minResinToKeep, int displayedMaximum)
+    {
+        if (originalResin is < 0 or > 200)
+        {
+            throw new ArgumentOutOfRangeException(nameof(originalResin));
+        }
+        if (condensedResin is < 0 or > 5)
+        {
+            throw new ArgumentOutOfRangeException(nameof(condensedResin));
+        }
+        if (minResinToKeep < 0)
+        {
+            throw new ArgumentOutOfRangeException(nameof(minResinToKeep));
+        }
+        if (displayedMaximum is < 0 or > 5)
+        {
+            throw new ArgumentOutOfRangeException(nameof(displayedMaximum));
+        }
+
+        var byResin = Math.Max(0, originalResin - minResinToKeep) / ResinConsumedPerCraft;
+        var byCapacity = 5 - condensedResin;
+        return Math.Min(displayedMaximum, Math.Min(byResin, byCapacity));
+    }
     private async Task<CraftingResinCounts> ReadCraftingResinCounts(CancellationToken ct)
     {
         int originalResin = -1;

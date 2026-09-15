@@ -33,4 +33,24 @@ public class GoToCraftingBenchTaskTests
         Assert.False(parsed);
         Assert.Equal(-1, count);
     }
+
+    [Theory]
+    [InlineData(131, 0, 0, 2, 2)]
+    [InlineData(200, 4, 0, 3, 1)]
+    [InlineData(180, 0, 70, 3, 1)]
+    [InlineData(119, 0, 0, 5, 1)]
+    [InlineData(59, 0, 0, 5, 0)]
+    [InlineData(200, 0, 0, 1, 1)]
+    public void ComputeSafeBatchCraftQuantity_UsesMaximumAllowedByUiResinReserveAndCapacity(
+        int originalResin,
+        int condensedResin,
+        int minResinToKeep,
+        int displayedMaximum,
+        int expected)
+    {
+        var result = GoToCraftingBenchTask.ComputeSafeBatchCraftQuantity(
+            originalResin, condensedResin, minResinToKeep, displayedMaximum);
+
+        Assert.Equal(expected, result);
+    }
 }

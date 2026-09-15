@@ -942,8 +942,8 @@ public partial class AutoDomainTask : ISoloTask<Dictionary<string, int>>
         Simulation.SendInput.Mouse.MiddleButtonClick();
         Sleep(900, _ct);
 
-        // 先检查当前视角。看得见树时直接转向；看不见就立即使用小地图对东，
-        // 避免在每一步旋转后执行昂贵的 YOLO 推理。
+        // 先检查当前视角。树已接近画面中心时直接继续；偏移较大时仍回到固定朝东并横移，
+        // 因为只转相机不会改变角色所在通道，可能让角色直线撞上秘境中的石柱。
         if (await TryFindPetrifiedTreeInCurrentView(telemetry))
         {
             Logger.LogInformation("已在当前视角找到石化古树，跳过固定朝东搜索");
@@ -952,7 +952,7 @@ public partial class AutoDomainTask : ISoloTask<Dictionary<string, int>>
 
         Logger.LogInformation("当前视角未找到石化古树，立即回退到固定朝东搜索");
 
-        // 相机对东后检测古树，首次命中即停止锁向并直接转动相机居中。
+        // 相机对东后检测古树；命中后通过横移把角色与古树所在通道对齐。
         var moveAvatarTask = DetectAndCenterPetrifiedTreeTask(treeCts, moveAvatarStartGate, telemetry);
 
         // 锁定东方向视角线程
@@ -993,36 +993,21 @@ public partial class AutoDomainTask : ISoloTask<Dictionary<string, int>>
 
             telemetry.FirstTreeDetectionMilliseconds ??= telemetry.ElapsedMilliseconds;
             TrySavePetrifiedTreeDiagnostic(capture, "current-view-detected");
-            TurnCameraTowardPetrifiedTree(treeRect, captureArea.Width, "当前视角");
+            var alignment = DeterminePetrifiedTreeAlignment(treeRect, captureArea.Width);
+            if (alignment != PetrifiedTreeAlignment.Centered)
+            {
+                var offset = treeRect.X + treeRect.Width / 2 - captureArea.Width / 2;
+                Logger.LogInformation(
+                    "当前视角检测到石化古树但偏移较大：offset={Offset}px；改用对东横移对齐",
+                    offset);
+                return false;
+            }
+
+            Logger.LogInformation("当前视角检测到石化古树且角色通道已对齐");
         }
 
         await Delay(180, _ct);
         return true;
-    }
-
-    private void TurnCameraTowardPetrifiedTree(Rect treeRect, int captureWidth, string source)
-    {
-        var treeMiddleX = treeRect.X + treeRect.Width / 2;
-        var offset = treeMiddleX - captureWidth / 2;
-        var centerTolerance = Math.Max(30, captureWidth / 20);
-        if (Math.Abs(offset) <= centerTolerance)
-        {
-            Logger.LogInformation("{Source}检测到石化古树已居中：offset={Offset}px", source, offset);
-            return;
-        }
-
-        // CameraOrientation 的既有换算约为每度 2 个鼠标单位；按约 90° 水平视野
-        // 将屏幕像素偏差换成较小的相机位移，随后 WalkToPressF 直行接近古树。
-        var mouseDelta = Math.Clamp(
-            (int)Math.Round(offset * 180.0 / captureWidth),
-            -120,
-            120);
-        Simulation.SendInput.Mouse.MoveMouseBy(mouseDelta, 0);
-        Logger.LogInformation(
-            "{Source}检测到石化古树并转向：offset={Offset}px，mouseDelta={MouseDelta}",
-            source,
-            offset,
-            mouseDelta);
     }
 
     private void TrySavePetrifiedTreeDiagnostic(ImageRegion capture, string phase)
@@ -1045,20 +1030,15 @@ public partial class AutoDomainTask : ISoloTask<Dictionary<string, int>>
     {
         return Task.Run(() =>
         {
-            // 两个工作线程同时启动。横移线程在相机完成对东前等待，取消时也能立刻退出，
-            // 避免未启动的冷 Task 让 Task.WhenAll 永久等待。
+            // 两个工作线程同时启动。横移线程在相机完成对东前等待，取消时也能立刻退出。
             startGate.Wait(treeCts.Token);
             var keyConfig = TaskContext.Instance().Config.KeyBindingsConfig;
             var moveLeftKey = keyConfig.MoveLeft.ToVK();
             var moveRightKey = keyConfig.MoveRight.ToVK();
-            var moveForwardKey = keyConfig.MoveForward.ToVK();
             var captureArea = TaskContext.Instance().SystemInfo.ScaleMax1080PCaptureRect;
-            var middleX = captureArea.Width / 2;
             var leftKeyDown = false;
             var rightKeyDown = false;
             var noDetectCount = 0;
-            var prevKey = moveLeftKey;
-            var backwardsAndForwardsCount = 0;
             try
             {
                 while (!_ct.IsCancellationRequested && !treeCts.IsCancellationRequested)
@@ -1073,125 +1053,79 @@ public partial class AutoDomainTask : ISoloTask<Dictionary<string, int>>
                     var treeRect = DetectTree(capture);
                     if (treeRect != default)
                     {
+                        var firstDetection = telemetry.FirstTreeDetectionMilliseconds is null;
                         telemetry.FirstTreeDetectionMilliseconds ??= telemetry.ElapsedMilliseconds;
-                        if (leftKeyDown)
+                        noDetectCount = 0;
+                        if (firstDetection)
                         {
-                            Simulation.SendInput.Keyboard.KeyUp(moveLeftKey);
-                            leftKeyDown = false;
-                        }
-                        if (rightKeyDown)
-                        {
-                            Simulation.SendInput.Keyboard.KeyUp(moveRightKey);
-                            rightKeyDown = false;
+                            TrySavePetrifiedTreeDiagnostic(capture, "fallback-detected");
                         }
 
-                        // 停止并行的固定朝东线程，避免它与接下来的目标居中互相拉扯。
-                        treeCts.Cancel();
-                        Sleep(120, _ct);
-                        TurnCameraTowardPetrifiedTree(treeRect, captureArea.Width, "对东回退");
-                        Sleep(180, _ct);
-                        Logger.LogInformation(
-                            "对东回退首次检测到石化古树后已直接转向，总耗时={Elapsed}ms",
-                            telemetry.ElapsedMilliseconds);
-                        break;
-                    }
-                    if (treeRect != default)
-                    {
-                        telemetry.FirstTreeDetectionMilliseconds ??= telemetry.ElapsedMilliseconds;
-                        var treeMiddleX = treeRect.X + treeRect.Width / 2;
-                        if (treeRect.X + treeRect.Width < middleX && !_config.ShortMovement)
+                        var alignment = DeterminePetrifiedTreeAlignment(treeRect, captureArea.Width);
+                        var offset = treeRect.X + treeRect.Width / 2 - captureArea.Width / 2;
+                        if (alignment == PetrifiedTreeAlignment.Centered)
                         {
-                            backwardsAndForwardsCount = 0;
-                            // 树在左边 往左走
-                            Debug.WriteLine($"树在左边 往左走 {treeMiddleX}  {middleX}");
+                            if (leftKeyDown)
+                            {
+                                Simulation.SendInput.Keyboard.KeyUp(moveLeftKey);
+                                leftKeyDown = false;
+                            }
                             if (rightKeyDown)
                             {
-                                // 先松开D键
                                 Simulation.SendInput.Keyboard.KeyUp(moveRightKey);
                                 rightKeyDown = false;
                             }
 
+                            Logger.LogInformation(
+                                "对东回退已通过横移对齐石化古树：offset={Offset}px，总耗时={Elapsed}ms",
+                                offset,
+                                telemetry.ElapsedMilliseconds);
+                            treeCts.Cancel();
+                            break;
+                        }
+
+                        if (_config.ShortMovement)
+                        {
+                            throw new RetryException(
+                                $"石化古树偏移 {offset}px，但短移动模式禁止横移对齐");
+                        }
+
+                        if (firstDetection)
+                        {
+                            Logger.LogInformation(
+                                "对东回退首次检测到石化古树：offset={Offset}px；开始横移对齐角色通道",
+                                offset);
+                        }
+                        if (alignment == PetrifiedTreeAlignment.MoveLeft)
+                        {
+                            if (rightKeyDown)
+                            {
+                                Simulation.SendInput.Keyboard.KeyUp(moveRightKey);
+                                rightKeyDown = false;
+                            }
                             if (!leftKeyDown)
                             {
                                 Simulation.SendInput.Keyboard.KeyDown(moveLeftKey);
                                 leftKeyDown = true;
                             }
                         }
-                        else if (treeRect.X > middleX && !_config.ShortMovement)
+                        else
                         {
-                            backwardsAndForwardsCount = 0;
-                            // 树在右边 往右走
-                            Debug.WriteLine($"树在右边 往右走 {treeMiddleX}  {middleX}");
                             if (leftKeyDown)
                             {
-                                // 先松开A键
                                 Simulation.SendInput.Keyboard.KeyUp(moveLeftKey);
                                 leftKeyDown = false;
                             }
-
                             if (!rightKeyDown)
                             {
                                 Simulation.SendInput.Keyboard.KeyDown(moveRightKey);
                                 rightKeyDown = true;
                             }
                         }
-                        else
-                        {
-                            // 树在中间 松开所有键
-                            if (rightKeyDown)
-                            {
-                                Simulation.SendInput.Keyboard.KeyUp(moveRightKey);
-                                prevKey = moveRightKey;
-                                rightKeyDown = false;
-                            }
-
-                            if (leftKeyDown)
-                            {
-                                Simulation.SendInput.Keyboard.KeyUp(moveLeftKey);
-                                prevKey = moveLeftKey;
-                                leftKeyDown = false;
-                            }
-
-                            // 松开按键后使用小碎步移动
-                            if (treeMiddleX < middleX)
-                            {
-                                if (prevKey == moveRightKey)
-                                {
-                                    backwardsAndForwardsCount++;
-                                }
-
-                                Simulation.SendInput.Keyboard.KeyDown(moveLeftKey);
-                                Sleep(60);
-                                Simulation.SendInput.Keyboard.KeyUp(moveLeftKey);
-                                prevKey = moveLeftKey;
-                            }
-                            else if (treeMiddleX > middleX)
-                            {
-                                if (prevKey == moveLeftKey)
-                                {
-                                    backwardsAndForwardsCount++;
-                                }
-
-                                Simulation.SendInput.Keyboard.KeyDown(moveRightKey);
-                                Sleep(60);
-                                Simulation.SendInput.Keyboard.KeyUp(moveRightKey);
-                                prevKey = moveRightKey;
-                            }
-                            else
-                            {
-                                Simulation.SendInput.Keyboard.KeyDown(moveForwardKey);
-                                Sleep(60);
-                                Simulation.SendInput.Keyboard.KeyUp(moveForwardKey);
-                                Sleep(500, _ct);
-                                treeCts.Cancel();
-                                break;
-                            }
-                        }
                     }
                     else
                     {
-                        backwardsAndForwardsCount = 0;
-                        // 左右巡逻
+                        // 未检测到时按原行为左右巡逻，直到树进入画面或超时。
                         noDetectCount++;
                         if (noDetectCount > 40)
                         {
@@ -1200,7 +1134,6 @@ public partial class AutoDomainTask : ISoloTask<Dictionary<string, int>>
                                 Simulation.SendInput.Keyboard.KeyUp(moveLeftKey);
                                 leftKeyDown = false;
                             }
-
                             if (!rightKeyDown)
                             {
                                 Simulation.SendInput.Keyboard.KeyDown(moveRightKey);
@@ -1214,24 +1147,12 @@ public partial class AutoDomainTask : ISoloTask<Dictionary<string, int>>
                                 Simulation.SendInput.Keyboard.KeyUp(moveRightKey);
                                 rightKeyDown = false;
                             }
-
                             if (!leftKeyDown)
                             {
                                 Simulation.SendInput.Keyboard.KeyDown(moveLeftKey);
                                 leftKeyDown = true;
                             }
                         }
-                    }
-
-                    if (backwardsAndForwardsCount >= _config.LeftRightMoveTimes)
-                    {
-                        // 左右移动5次说明已经在树中心了
-                        Simulation.SendInput.Keyboard.KeyDown(moveForwardKey);
-                        Sleep(60);
-                        Simulation.SendInput.Keyboard.KeyUp(moveForwardKey);
-                        Sleep(500, _ct);
-                        treeCts.Cancel();
-                        break;
                     }
 
                     Sleep(60, _ct);
@@ -1244,7 +1165,6 @@ public partial class AutoDomainTask : ISoloTask<Dictionary<string, int>>
                 {
                     Simulation.SendInput.Keyboard.KeyUp(moveLeftKey);
                 }
-
                 if (rightKeyDown)
                 {
                     Simulation.SendInput.Keyboard.KeyUp(moveRightKey);
@@ -1254,7 +1174,6 @@ public partial class AutoDomainTask : ISoloTask<Dictionary<string, int>>
             VisionContext.Instance().DrawContent.ClearAll();
         });
     }
-
     private Rect DetectTree(ImageRegion region)
     {
         var result = _predictor.Predictor.Detect(region.CacheImage);
@@ -1354,6 +1273,34 @@ public partial class AutoDomainTask : ISoloTask<Dictionary<string, int>>
         public TimeSpan Elapsed => _stopwatch.Elapsed;
         public long? CameraAlignedMilliseconds { get; set; }
         public long? FirstTreeDetectionMilliseconds { get; set; }
+    }
+
+    internal enum PetrifiedTreeAlignment
+    {
+        Centered,
+        MoveLeft,
+        MoveRight
+    }
+
+    internal static PetrifiedTreeAlignment DeterminePetrifiedTreeAlignment(Rect treeRect, int captureWidth)
+    {
+        if (captureWidth <= 0)
+        {
+            throw new ArgumentOutOfRangeException(nameof(captureWidth));
+        }
+        if (treeRect.Width <= 0)
+        {
+            throw new ArgumentOutOfRangeException(nameof(treeRect));
+        }
+
+        var offset = treeRect.X + treeRect.Width / 2 - captureWidth / 2;
+        var centerTolerance = Math.Max(30, captureWidth / 20);
+        if (Math.Abs(offset) <= centerTolerance)
+        {
+            return PetrifiedTreeAlignment.Centered;
+        }
+
+        return offset < 0 ? PetrifiedTreeAlignment.MoveLeft : PetrifiedTreeAlignment.MoveRight;
     }
 
     private async Task<(ImageRegion Capture, ResinStatus Status)?> WaitForResinPrompt()
