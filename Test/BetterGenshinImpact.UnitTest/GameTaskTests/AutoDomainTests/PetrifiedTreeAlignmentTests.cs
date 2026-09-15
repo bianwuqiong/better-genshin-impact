@@ -7,7 +7,8 @@ public class PetrifiedTreeAlignmentTests
 {
     [Theory]
     [InlineData(900, 120, 0)]
-    [InlineData(808, 112, 0)]
+    [InlineData(850, 112, 0)]
+    [InlineData(839, 120, 1)]
     [InlineData(120, 140, 1)]
     [InlineData(1400, 170, 2)]
     public void DeterminePetrifiedTreeAlignment_UsesLateralMovementForLargeOffsets(
@@ -24,5 +25,18 @@ public class PetrifiedTreeAlignmentTests
     {
         Assert.Throws<ArgumentOutOfRangeException>(() =>
             AutoDomainTask.DeterminePetrifiedTreeAlignment(new Rect(0, 0, 100, 100), 0));
+    }
+
+    [Theory]
+    [InlineData(56, 0)]
+    [InlineData(-56, 0)]
+    [InlineData(61, 915)]
+    [InlineData(-130, 1950)]
+    [InlineData(525, 2500)]
+    public void ComputePetrifiedTreeStrafeMilliseconds_UsesBoundedObservablePulses(
+        int offset, int expected)
+    {
+        Assert.Equal(expected,
+            AutoDomainTask.ComputePetrifiedTreeStrafeMilliseconds(offset, 1920));
     }
 }

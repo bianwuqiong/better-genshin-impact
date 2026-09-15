@@ -1096,32 +1096,39 @@ public partial class AutoDomainTask : ISoloTask<Dictionary<string, int>>
                                 "对东回退首次检测到石化古树：offset={Offset}px；开始横移对齐角色通道",
                                 offset);
                         }
-                        if (alignment == PetrifiedTreeAlignment.MoveLeft)
+                        if (leftKeyDown)
                         {
-                            if (rightKeyDown)
-                            {
-                                Simulation.SendInput.Keyboard.KeyUp(moveRightKey);
-                                rightKeyDown = false;
-                            }
-                            if (!leftKeyDown)
-                            {
-                                Simulation.SendInput.Keyboard.KeyDown(moveLeftKey);
-                                leftKeyDown = true;
-                            }
+                            Simulation.SendInput.Keyboard.KeyUp(moveLeftKey);
+                            leftKeyDown = false;
                         }
-                        else
+                        if (rightKeyDown)
                         {
-                            if (leftKeyDown)
-                            {
-                                Simulation.SendInput.Keyboard.KeyUp(moveLeftKey);
-                                leftKeyDown = false;
-                            }
-                            if (!rightKeyDown)
-                            {
-                                Simulation.SendInput.Keyboard.KeyDown(moveRightKey);
-                                rightKeyDown = true;
-                            }
+                            Simulation.SendInput.Keyboard.KeyUp(moveRightKey);
+                            rightKeyDown = false;
                         }
+
+                        // YOLO 推理在资源紧张时可能持续数秒。若在推理期间一直按住方向键，
+                        // 本轮 -130px 曾一次跨到 +81px 并被过宽容差提前接受。改为按偏移量
+                        // 计算的有限脉冲，松键后再重新截图，避免不可观测的持续横移。
+                        var moveKey = alignment == PetrifiedTreeAlignment.MoveLeft
+                            ? moveLeftKey
+                            : moveRightKey;
+                        var pulseMilliseconds = ComputePetrifiedTreeStrafeMilliseconds(offset, captureArea.Width);
+                        Logger.LogInformation(
+                            "石化古树横移脉冲：offset={Offset}px，方向={Direction}，持续={Duration}ms",
+                            offset,
+                            alignment,
+                            pulseMilliseconds);
+                        Simulation.SendInput.Keyboard.KeyDown(moveKey);
+                        try
+                        {
+                            Sleep(pulseMilliseconds, _ct);
+                        }
+                        finally
+                        {
+                            Simulation.SendInput.Keyboard.KeyUp(moveKey);
+                        }
+                        Sleep(120, _ct);
                     }
                     else
                     {
@@ -1294,13 +1301,29 @@ public partial class AutoDomainTask : ISoloTask<Dictionary<string, int>>
         }
 
         var offset = treeRect.X + treeRect.Width / 2 - captureWidth / 2;
-        var centerTolerance = Math.Max(30, captureWidth / 20);
+        var centerTolerance = Math.Max(30, captureWidth / 32);
         if (Math.Abs(offset) <= centerTolerance)
         {
             return PetrifiedTreeAlignment.Centered;
         }
 
         return offset < 0 ? PetrifiedTreeAlignment.MoveLeft : PetrifiedTreeAlignment.MoveRight;
+    }
+
+    internal static int ComputePetrifiedTreeStrafeMilliseconds(int offset, int captureWidth)
+    {
+        if (captureWidth <= 0)
+        {
+            throw new ArgumentOutOfRangeException(nameof(captureWidth));
+        }
+
+        var centerTolerance = Math.Max(30, captureWidth / 32);
+        if (Math.Abs(offset) <= centerTolerance)
+        {
+            return 0;
+        }
+
+        return Math.Clamp(Math.Abs(offset) * 15, 250, 2500);
     }
 
     private async Task<(ImageRegion Capture, ResinStatus Status)?> WaitForResinPrompt()
