@@ -30,9 +30,9 @@ public class PetrifiedTreeAlignmentTests
     [Theory]
     [InlineData(56, 0)]
     [InlineData(-56, 0)]
-    [InlineData(61, 915)]
-    [InlineData(-130, 1950)]
-    [InlineData(525, 2500)]
+    [InlineData(61, 183)]
+    [InlineData(-130, 390)]
+    [InlineData(525, 900)]
     public void ComputePetrifiedTreeStrafeMilliseconds_UsesBoundedObservablePulses(
         int offset, int expected)
     {

@@ -1323,7 +1323,9 @@ public partial class AutoDomainTask : ISoloTask<Dictionary<string, int>>
             return 0;
         }
 
-        return Math.Clamp(Math.Abs(offset) * 15, 250, 2500);
+        // 2026-09-15 实机序列显示横移速度约为 160px/s。采用约 50% 比例增益，
+        // 给下一帧识别保留余量，避免 +178/-268 这类跨越中心的往返振荡。
+        return Math.Clamp(Math.Abs(offset) * 3, 120, 900);
     }
 
     private async Task<(ImageRegion Capture, ResinStatus Status)?> WaitForResinPrompt()
