@@ -53,4 +53,25 @@ public class GoToCraftingBenchTaskTests
 
         Assert.Equal(expected, result);
     }
+
+    [Theory]
+    [InlineData(71, 1, 71, 1, true)]
+    [InlineData(71, 1, 11, 2, false)]
+    [InlineData(71, 1, 11, 1, false)]
+    [InlineData(71, 1, 71, 2, false)]
+    public void IsCraftingInventoryUnchanged_OnlyAcceptsExactNoChange(
+        int originalBefore,
+        int condensedBefore,
+        int originalAfter,
+        int condensedAfter,
+        bool expected)
+    {
+        var result = GoToCraftingBenchTask.IsCraftingInventoryUnchanged(
+            originalBefore,
+            condensedBefore,
+            originalAfter,
+            condensedAfter);
+
+        Assert.Equal(expected, result);
+    }
 }

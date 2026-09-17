@@ -19,12 +19,6 @@ public static class CredentialManagerHelper
     public static Credential? ReadCredential(string applicationName)
     {
         var credential = CredentialManager.ReadCredential(applicationName);
-        if (credential == null)
-        {
-            Console.WriteLine("No credential found.");
-            return null;
-        }
-
         return credential;
     }
 

@@ -197,9 +197,10 @@ public class GoToCraftingBenchTask
         _craftActionCommitted = true;
 
         CraftingResinCounts after;
+        bool resultDismissed = false;
         try
         {
-            bool resultDismissed = await NewRetry.WaitForAction(() =>
+            resultDismissed = await NewRetry.WaitForAction(() =>
             {
                 using var confirmCapture = CaptureToRectArea();
                 return Bv.ClickBlackConfirmButton(confirmCapture);
@@ -216,6 +217,42 @@ public class GoToCraftingBenchTask
         {
             throw new CraftingOutcomeUnknownException(
                 "已点击批量合成确认，但结果或后库存无法确认；禁止自动重试", e);
+        }
+
+        if (!resultDismissed
+            && IsCraftingInventoryUnchanged(
+                initial.OriginalResin,
+                initial.CondensedResin,
+                after.OriginalResin,
+                after.CondensedResin))
+        {
+            // 结果确认按钮没有出现，且第一次库存读取没有任何变化时，
+            // 再等待并进行一次独立稳定读取。只有两次都确认完全未变化，
+            // 才能把本次提交判定为未生效并安全重试当前节点。
+            await Delay(1200, ct);
+            CraftingResinCounts settled;
+            try
+            {
+                settled = await ReadCraftingResinCounts(ct);
+            }
+            catch (Exception e)
+            {
+                throw new CraftingOutcomeUnknownException(
+                    "已点击批量合成确认，但二次库存核验失败；禁止自动重试", e);
+            }
+
+            if (IsCraftingInventoryUnchanged(
+                    initial.OriginalResin,
+                    initial.CondensedResin,
+                    settled.OriginalResin,
+                    settled.CondensedResin))
+            {
+                _craftActionCommitted = false;
+                throw new CraftingActionNotCommittedException(
+                    $"提交后库存连续两次未变化：原粹/浓缩仍为 {settled.OriginalResin}/{settled.CondensedResin}；将在本节点重试");
+            }
+
+            after = settled;
         }
 
         int expectedOriginal = initial.OriginalResin - targetQuantity * ResinConsumedPerCraft;
@@ -297,6 +334,15 @@ public class GoToCraftingBenchTask
         var byResin = Math.Max(0, originalResin - minResinToKeep) / ResinConsumedPerCraft;
         var byCapacity = 5 - condensedResin;
         return Math.Min(displayedMaximum, Math.Min(byResin, byCapacity));
+    }
+
+    internal static bool IsCraftingInventoryUnchanged(
+        int originalBefore,
+        int condensedBefore,
+        int originalAfter,
+        int condensedAfter)
+    {
+        return originalBefore == originalAfter && condensedBefore == condensedAfter;
     }
     private async Task<CraftingResinCounts> ReadCraftingResinCounts(CancellationToken ct)
     {
@@ -466,6 +512,13 @@ public class GoToCraftingBenchTask
         }
 
         public CraftingOutcomeUnknownException(string message, Exception innerException) : base(message, innerException)
+        {
+        }
+    }
+
+    private sealed class CraftingActionNotCommittedException : Exception
+    {
+        public CraftingActionNotCommittedException(string message) : base(message)
         {
         }
     }

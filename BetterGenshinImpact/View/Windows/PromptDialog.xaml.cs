@@ -123,6 +123,10 @@ public partial class PromptDialog
             {
                 return comboBox.Text;
             }
+            else if (DynamicContent.Content is PasswordBox passwordBox)
+            {
+                return passwordBox.Password;
+            }
             else
             {
                 return "true";

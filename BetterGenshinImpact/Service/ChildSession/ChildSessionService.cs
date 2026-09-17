@@ -8,6 +8,7 @@ using System.Threading.Tasks;
 using System.Windows;
 using System.Windows.Threading;
 using BetterGenshinImpact.Core.Config;
+using BetterGenshinImpact.Helpers.Win32;
 using BetterGenshinImpact.View.Windows;
 using BetterGenshinImpact.Service.Instance;
 using BetterGenshinImpact.Service.Interface;
@@ -103,6 +104,22 @@ public sealed class ChildSessionService : IDisposable
 
         RefreshState();
         return ChildSessionId is not null;
+    }
+
+    public bool HasAutoLoginPassword => ChildSessionCredentialStore.HasPassword();
+
+    public void SaveAutoLoginPassword(string password)
+    {
+        ThrowIfDisposed();
+        ChildSessionCredentialStore.SavePassword(password);
+        RefreshState("桌面分身自动登录密码已保存到 Windows 凭据管理器");
+    }
+
+    public void ClearAutoLoginPassword()
+    {
+        ThrowIfDisposed();
+        ChildSessionCredentialStore.Delete();
+        RefreshState("桌面分身自动登录密码已清除");
     }
 
     public ChildSessionService(

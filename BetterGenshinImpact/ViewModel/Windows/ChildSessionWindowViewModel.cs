@@ -14,6 +14,7 @@ using Microsoft.Win32;
 using Wpf.Ui.Controls;
 using MessageBoxButton = System.Windows.MessageBoxButton;
 using MessageBoxResult = System.Windows.MessageBoxResult;
+using PasswordBox = System.Windows.Controls.PasswordBox;
 
 namespace BetterGenshinImpact.ViewModel.Windows;
 
@@ -260,6 +261,73 @@ public partial class ChildSessionWindowViewModel : ViewModel
     private Task LaunchBetterGiAsync()
     {
         return ExecuteAsync(_childSessionService.LaunchBetterGiAsync);
+    }
+
+    [RelayCommand]
+    private void ConfigureAutoLoginPassword()
+    {
+        var passwordBox = new PasswordBox
+        {
+            MinWidth = 360
+        };
+        var password = PromptDialog.Prompt(
+            "请输入当前 Windows 账户密码。\n\n密码只保存到 Windows 凭据管理器，不会写入项目文件、命令行或运行日志。",
+            "设置桌面分身自动登录密码",
+            passwordBox,
+            new Size(560, 280));
+        if (string.IsNullOrEmpty(password))
+        {
+            return;
+        }
+
+        try
+        {
+            _childSessionService.SaveAutoLoginPassword(password);
+            ShowNotification(
+                "自动登录已启用",
+                "下次创建桌面分身时将自动使用已保存的 Windows 凭据。",
+                InfoBarSeverity.Success);
+        }
+        catch (Exception exception)
+        {
+            ShowError(exception);
+        }
+    }
+
+    [RelayCommand]
+    private void ClearAutoLoginPassword()
+    {
+        if (!_childSessionService.HasAutoLoginPassword)
+        {
+            ShowNotification(
+                "未找到自动登录凭据",
+                "当前没有保存桌面分身自动登录密码。",
+                InfoBarSeverity.Informational);
+            return;
+        }
+
+        var result = ThemedMessageBox.Question(
+            "确定清除桌面分身自动登录密码吗？清除后，下次登录可能需要手动输入。",
+            "清除自动登录密码",
+            MessageBoxButton.YesNo,
+            MessageBoxResult.No);
+        if (result != MessageBoxResult.Yes)
+        {
+            return;
+        }
+
+        try
+        {
+            _childSessionService.ClearAutoLoginPassword();
+            ShowNotification(
+                "自动登录已清除",
+                "下次创建桌面分身时将不再自动填入密码。",
+                InfoBarSeverity.Success);
+        }
+        catch (Exception exception)
+        {
+            ShowError(exception);
+        }
     }
 
     [RelayCommand]

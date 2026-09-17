@@ -166,8 +166,13 @@
                                 </ui:MenuItem>
                                 <ui:MenuItem Header="{i18n:T 更多}">
                                     <ui:MenuItem Header="{i18n:T 以管理员权限启动…}"
-                                                 Command="{Binding LaunchExecutableCommand}"
-                                                 Icon="{ui:SymbolIcon Shield24}" />
+                                                  Command="{Binding LaunchExecutableCommand}"
+                                                  Icon="{ui:SymbolIcon Shield24}" />
+                                    <Separator />
+                                    <ui:MenuItem Header="设置桌面分身自动登录密码"
+                                                  Command="{Binding ConfigureAutoLoginPasswordCommand}" />
+                                    <ui:MenuItem Header="清除桌面分身自动登录密码"
+                                                  Command="{Binding ClearAutoLoginPasswordCommand}" />
                                 </ui:MenuItem>
                             </ContextMenu>
                         </ui:DropDownButton.Flyout>

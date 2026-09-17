@@ -4,6 +4,7 @@ using System.Reflection;
 using System.Runtime.InteropServices;
 using System.Threading.Tasks;
 using System.Windows.Forms;
+using BetterGenshinImpact.Helpers.Win32;
 using BetterGenshinImpact.Service.ChildSession;
 using DrawingSize = System.Drawing.Size;
 
@@ -79,6 +80,20 @@ internal sealed class RdpActiveXHost : AxHost
         SetComProperty(client, "ColorDepth", 32);
         SetComProperty(client, "ConnectingText", "正在创建 BetterGI 桌面分身...");
         SetComProperty(client, "DisconnectedText", "BetterGI 桌面分身已断开");
+
+        var savedPassword = ChildSessionCredentialStore.ReadPassword();
+        if (savedPassword is not null)
+        {
+            RunComStep("设置 RDP 登录用户", () =>
+            {
+                SetComProperty(client, "Domain", Environment.UserDomainName);
+                SetComProperty(client, "UserName", Environment.UserName);
+            });
+
+            var nonScriptableClient = (IMsRdpClientNonScriptable)client;
+            RunComStep("设置 RDP 自动登录密码", () =>
+                nonScriptableClient.put_ClearTextPassword(savedPassword));
+        }
 
         var securedSettings = GetComProperty(client, "SecuredSettings2")
             ?? throw new COMException("RDP ActiveX 未返回 SecuredSettings2。");
