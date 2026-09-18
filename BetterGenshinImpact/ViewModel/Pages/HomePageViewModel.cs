@@ -166,6 +166,7 @@ public partial class HomePageViewModel : ViewModel, IDisposable
 
     public void HandleActivation(CommandLineOptions commandLineOptions)
     {
+        _autoRun = false;
         if (commandLineOptions.Action == CommandLineAction.Start)
         {
             _ = OnStartTriggerAsync();

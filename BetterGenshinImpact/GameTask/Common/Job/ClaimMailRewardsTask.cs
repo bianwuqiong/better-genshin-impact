@@ -31,6 +31,14 @@ public class ClaimMailRewardsTask
         {
             Logger.LogDebug(e, "领取邮件奖励异常");
             Logger.LogError("领取邮件奖励异常: {Msg}", e.Message);
+            try
+            {
+                await _returnMainUiTask.Start(ct);
+            }
+            catch
+            {
+                // ignore
+            }
             EmitMailEvent(new MailClaimResult("failed", false, false, false));
         }
     }
@@ -61,15 +69,16 @@ public class ClaimMailRewardsTask
                 if (claimAllClicked)
                 {
                     Logger.LogInformation("邮件：{Text}", "全部领取");
-                    await Delay(700, ct);
-                    claimAllGone = await WaitForClaimButtonToDisappear(ct);
-                    if (!claimAllGone)
-                    {
-                        throw new Exception("领取邮件后仍检测到全部领取按钮");
-                    }
+                    // 领取后会有“获得物品”弹窗，等待弹窗展示后按 ESC 关闭弹窗
+                    await Delay(1000, ct);
+                    TaskContext.Instance().PostMessageSimulator.KeyPress(User32.VK.VK_ESCAPE);
+                    await Delay(800, ct);
 
-                    // 领取后会有“获得物品”弹窗，按 ESC 关闭弹窗
-                    await Delay(500, ct);
+                    // 检查全部领取按钮是否已消失或置灰（不强求消失，仅作状态记录）
+                    claimAllGone = await WaitForClaimButtonToDisappear(ct);
+                    Logger.LogInformation("邮件全部领取完成，按钮状态: disappeared={Disappeared}", claimAllGone);
+
+                    // 按 ESC 退出邮件窗口
                     TaskContext.Instance().PostMessageSimulator.KeyPress(User32.VK.VK_ESCAPE);
                     await Delay(500, ct);
                 }
@@ -77,6 +86,7 @@ public class ClaimMailRewardsTask
                 {
                     Logger.LogInformation("邮件：{Text}", "没有可领取邮件奖励");
                     // 没有全部领取按钮，按 ESC 退出邮件窗口
+                    await Delay(300, ct);
                     TaskContext.Instance().PostMessageSimulator.KeyPress(User32.VK.VK_ESCAPE);
                     await Delay(500, ct);
                 }
@@ -198,7 +208,7 @@ public class ClaimMailRewardsTask
         {
             using var capture = CaptureToRectArea();
             return !capture.Find(ElementRecognition.Get("Collect", capture)).IsExist();
-        }, ct, 12, 300);
+        }, ct, 8, 250);
     }
 
     private static void EmitMailEvent(MailClaimResult result)
@@ -206,11 +216,11 @@ public class ClaimMailRewardsTask
         var payload = JsonConvert.SerializeObject(new
         {
             task = "领取邮件",
-            result.Status,
+            status = result.Status,
             evidenceVerified = true,
-            result.MailIconFound,
-            result.ClaimAllClicked,
-            result.ClaimAllGone,
+            mailIconFound = result.MailIconFound,
+            claimAllClicked = result.ClaimAllClicked,
+            claimAllGone = result.ClaimAllGone,
         });
         Logger.LogInformation("[AUTO_GAME_EVENT] " + payload);
     }

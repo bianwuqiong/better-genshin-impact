@@ -81,6 +81,7 @@ public class ApplicationHostService(
                     case CommandLineAction.StartChildSessionOneDragon:
                         // 根实例只负责建立桌面分身；主页加载后把配置转交给子会话。
                         _ = _navigationWindow.Navigate(typeof(HomePage));
+                        App.GetService<HomePageViewModel>()?.HandleActivation(cmdOptions);
                         break;
 
                     case CommandLineAction.StartGroups:
